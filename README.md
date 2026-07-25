@@ -9,28 +9,14 @@ actually exposes—usage windows, reset times, credits, token counts, costs, and
 local activity—without pretending that unlike metrics are directly
 comparable.
 
-> [!IMPORTANT]
-> `agent-monitor` is a local, read-only monitor. It does not send prompts,
-> transcripts, credentials, or usage data to its own server.
-
-## What it looks like
-
-The live terminal UI presents every enabled provider as a compact card:
-
-```text
-╭──────────────────────────────────────────────────────────────────────────╮
-│ › ● Codex · Plus                                      updated 12:42      │
-│ Plan  5-hour  █████░░░░░░░ 42% · resets in 2h 14m                       │
-│       1-week  ███░░░░░░░░░ 25% · resets in 4d 8h                        │
-╰──────────────────────────────────────────────────────────────────────────╯
-╭──────────────────────────────────────────────────────────────────────────╮
-│   ● OpenCode                                          updated 12:42      │
-│ Local  Sessions 18 · Tokens 2.4M · Estimated cost ~$8.21                 │
-╰──────────────────────────────────────────────────────────────────────────╯
-```
+![agent-monitor showing live Codex, Claude Code, Cursor, OpenCode, and Gemini CLI usage in the terminal](docs/images/agent-monitor-dashboard.png)
 
 The exact fields depend on the provider, account, CLI version, and whether you
 have connected its optional web dashboard.
+
+> [!IMPORTANT]
+> `agent-monitor` is a local, read-only monitor. It does not send prompts,
+> transcripts, credentials, or usage data to its own server.
 
 ## How it works
 
