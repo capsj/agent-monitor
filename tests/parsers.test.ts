@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { parseClaudeResetAt, parseClaudeUsage } from "../src/adapters/claude.js";
+import {
+  claudeWorkspaceTrustTarget,
+  isClaudeWorkspaceTrustPrompt,
+  parseClaudeResetAt,
+  parseClaudeUsage,
+} from "../src/adapters/claude.js";
 import { parseCursorAbout } from "../src/adapters/cursor.js";
 import {
   parseClaudeDashboard,
@@ -38,6 +43,25 @@ describe("provider parsers", () => {
     const snapshot = parseClaudeUsage("Authentication required. Log in to continue.");
     expect(snapshot.status).toBe("unavailable");
     expect(snapshot.windows).toHaveLength(0);
+  });
+
+  it("recognizes Claude workspace trust without inventing a Team plan", () => {
+    const prompt = `
+      Permission Required: Accessing workspace:
+      /tmp/agent-monitor/claude-workspace
+      Quick safety check: Is this a project you created or one you trust?
+      Like your own code, a well-known open source project, or work from your team.
+      Please answer y or n.
+    `;
+    const snapshot = parseClaudeUsage(prompt);
+
+    expect(isClaudeWorkspaceTrustPrompt(prompt)).toBe(true);
+    expect(claudeWorkspaceTrustTarget(prompt)).toBe(
+      "/tmp/agent-monitor/claude-workspace",
+    );
+    expect(snapshot.status).toBe("unavailable");
+    expect(snapshot.plan).toBeNull();
+    expect(snapshot.message).toBe("Claude is waiting for workspace trust");
   });
 
   it("parses Claude's live usage screen and keeps reset times across redraws", () => {

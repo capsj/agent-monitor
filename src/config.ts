@@ -58,6 +58,18 @@ export function dataDirectory(): string {
   return join(base, "agent-monitor");
 }
 
+export function cacheDirectory(): string {
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Caches", "agent-monitor");
+  }
+  const base = process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
+  return join(base, "agent-monitor");
+}
+
+export function claudeWorkspacePath(): string {
+  return join(cacheDirectory(), "claude-workspace");
+}
+
 export function historyPath(): string {
   return join(dataDirectory(), "history.sqlite3");
 }

@@ -1,8 +1,75 @@
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
+import { join, resolve } from "node:path";
 import type { ProviderAdapter, ProviderSnapshot, UsageWindow } from "../types.js";
+import { claudeWorkspacePath } from "../config.js";
 import { DashboardSession } from "../dashboard-auth.js";
-import { detectVersion } from "../utils/process.js";
+import { cleanTerminalOutput, detectVersion } from "../utils/process.js";
 import { parseClaudeDashboard } from "./dashboard-parsers.js";
 import { PtySession } from "./pty-session.js";
+
+const workspaceMarker = ".agent-monitor-workspace";
+const workspaceMarkerContents = "Private workspace for agent-monitor's read-only Claude usage session.\n";
+
+export function isClaudeWorkspaceTrustPrompt(raw: string): boolean {
+  const text = cleanTerminalOutput(raw);
+  return (
+    /Permission Required:\s*Accessing workspace:/i.test(text) &&
+    /Please answer y or n/i.test(text)
+  );
+}
+
+export function claudeWorkspaceTrustTarget(raw: string): string | undefined {
+  const text = cleanTerminalOutput(raw);
+  return text
+    .match(
+      /Permission Required:\s*Accessing workspace:\s*([\s\S]*?)\s*Quick safety check:/i,
+    )?.[1]
+    ?.replace(/\s*\n\s*/g, " ")
+    .trim();
+}
+
+function claudePlan(raw: string): string | null {
+  return (
+    cleanTerminalOutput(raw)
+      .match(/\bClaude\s+(Pro|Max 5x|Max 20x|Team|Enterprise)\b/i)?.[1] ?? null
+  );
+}
+
+function ensureClaudeWorkspace(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error(`Claude monitor workspace is not a regular directory: ${path}`);
+  }
+  chmodSync(path, 0o700);
+
+  const marker = join(path, workspaceMarker);
+  const entries = readdirSync(path);
+  if (!entries.includes(workspaceMarker)) {
+    if (entries.length > 0) {
+      throw new Error(
+        `Refusing to trust non-empty Claude monitor workspace without its marker: ${path}`,
+      );
+    }
+    writeFileSync(marker, workspaceMarkerContents, { encoding: "utf8", mode: 0o600 });
+  } else if (readFileSync(marker, "utf8") !== workspaceMarkerContents) {
+    throw new Error(`Claude monitor workspace marker is invalid: ${path}`);
+  }
+
+  const unexpected = readdirSync(path).filter((entry) => entry !== workspaceMarker);
+  if (unexpected.length > 0) {
+    throw new Error(
+      `Refusing to trust Claude monitor workspace containing unexpected files: ${path}`,
+    );
+  }
+}
 
 function parseReset(line: string): string | undefined {
   return line.match(/reset(?:s|ting)?(?:\s+in|\s+at|:)?\s+(.+)$/i)?.[1]?.trim();
@@ -295,6 +362,7 @@ export function parseClaudeUsage(
     return Number.isFinite(parsed) ? parsed : undefined;
   };
   const loginRequired = /log in|not authenticated|authentication required/i.test(joined);
+  const trustRequired = isClaudeWorkspaceTrustPrompt(raw);
   const usageWindows = [...windows.values()];
   const metrics: ProviderSnapshot["metrics"] = [];
   const spent = currencyValue(extraSpent);
@@ -347,14 +415,20 @@ export function parseClaudeUsage(
     providerId: "claude",
     providerName: "Claude Code",
     collectedAt: now.toISOString(),
-    status: available ? "ok" : loginRequired ? "unavailable" : "partial",
+    status: available
+      ? "ok"
+      : loginRequired || trustRequired
+        ? "unavailable"
+        : "partial",
     source: "cli",
-    plan: joined.match(/\b(Pro|Max 5x|Max 20x|Team|Enterprise)\b/i)?.[1] ?? null,
+    plan: claudePlan(raw),
     summary:
       primary?.usedPercent !== undefined
         ? `${primary.usedPercent.toFixed(0)}% ${primary.label.toLowerCase()} used`
         : loginRequired
           ? "Not authenticated"
+          : trustRequired
+            ? "Workspace trust required"
           : "Usage format not recognized",
     windows: usageWindows,
     metrics,
@@ -362,7 +436,9 @@ export function parseClaudeUsage(
       ? null
       : loginRequired
         ? "Run claude and sign in"
-        : "Claude's /usage screen changed or did not expose subscription limits",
+        : trustRequired
+          ? "Claude is waiting for workspace trust"
+          : "Claude's /usage screen changed or did not expose subscription limits",
     version: version ?? null,
   };
 }
@@ -373,19 +449,30 @@ export class ClaudeAdapter implements ProviderAdapter {
   readonly defaultRefreshMs: number;
   private readonly session: PtySession;
   private readonly dashboard: DashboardSession;
+  private readonly workspace: string;
   private version?: string;
+  private plan?: string;
 
   constructor(
     private readonly executable = "claude",
     refreshMs = 60_000,
     private readonly timeoutMs = 15_000,
+    workspace = claudeWorkspacePath(),
   ) {
     this.defaultRefreshMs = refreshMs;
+    this.workspace = resolve(workspace);
     this.dashboard = new DashboardSession("claude", timeoutMs);
     this.session = new PtySession(executable, {
-      args: ["--ax-screen-reader"],
+      args: [
+        "--ax-screen-reader",
+        "--safe-mode",
+        "--permission-mode",
+        "plan",
+        "--no-chrome",
+      ],
       rows: 45,
       cols: 120,
+      cwd: this.workspace,
       startupTimeoutMs: timeoutMs,
       startupSettleMs: 1_000,
       inputDelayMs: 300,
@@ -400,7 +487,7 @@ export class ClaudeAdapter implements ProviderAdapter {
 
   async start(): Promise<void> {
     const detected = await this.detect();
-    if (detected.available) await this.session.start();
+    if (detected.available) await this.prepareSession();
   }
 
   async stop(): Promise<void> {
@@ -415,11 +502,17 @@ export class ClaudeAdapter implements ProviderAdapter {
       const detected = await this.detect();
       this.version = detected.version;
     }
+    await this.prepareSession();
     const [output, dashboardResult] = await Promise.all([
-      this.session.capture("/usage", this.timeoutMs),
+      this.captureUsage(),
       this.dashboard.read(),
     ]);
-    const cli = parseClaudeUsage(output, this.version);
+    const parsedCli = parseClaudeUsage(output, this.version);
+    if (parsedCli.plan) this.plan = parsedCli.plan;
+    const cli = {
+      ...parsedCli,
+      plan: parsedCli.plan ?? this.plan ?? null,
+    };
     if (dashboardResult.status !== "ok") {
       return {
         ...cli,
@@ -452,5 +545,41 @@ export class ClaudeAdapter implements ProviderAdapter {
       metrics: [...dashboard.metrics, ...cliNonAdditional],
       message: cli.message,
     };
+  }
+
+  private async prepareSession(): Promise<void> {
+    ensureClaudeWorkspace(this.workspace);
+    await this.session.start();
+    await this.acceptWorkspaceTrust(this.session.currentOutput());
+  }
+
+  private async captureUsage(): Promise<string> {
+    let output = await this.session.capture("/usage", this.timeoutMs);
+    if (await this.acceptWorkspaceTrust(output)) {
+      output = await this.session.capture("/usage", this.timeoutMs);
+    }
+    return output;
+  }
+
+  private async acceptWorkspaceTrust(output: string): Promise<boolean> {
+    this.rememberPlan(output);
+    if (!isClaudeWorkspaceTrustPrompt(output)) return false;
+    const target = claudeWorkspaceTrustTarget(output);
+    if (!target || resolve(target) !== this.workspace) {
+      throw new Error(
+        `Claude requested trust for an unexpected workspace: ${target ?? "unknown"}`,
+      );
+    }
+
+    const confirmation = await this.session.capture("y", this.timeoutMs);
+    this.rememberPlan(confirmation);
+    if (isClaudeWorkspaceTrustPrompt(confirmation)) {
+      throw new Error("Claude did not accept the controlled monitor workspace");
+    }
+    return true;
+  }
+
+  private rememberPlan(output: string): void {
+    this.plan = claudePlan(output) ?? this.plan;
   }
 }

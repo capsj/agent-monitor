@@ -5,6 +5,7 @@ export interface PtySessionOptions {
   args?: string[];
   cols?: number;
   rows?: number;
+  cwd?: string;
   env?: NodeJS.ProcessEnv;
   startupTimeoutMs?: number;
   startupSettleMs?: number;
@@ -31,7 +32,7 @@ export class PtySession {
       name: "xterm-256color",
       cols: this.options.cols ?? 120,
       rows: this.options.rows ?? 40,
-      cwd: process.cwd(),
+      cwd: this.options.cwd ?? process.cwd(),
       env: {
         ...process.env,
         TERM: "xterm-256color",
@@ -53,6 +54,10 @@ export class PtySession {
         setTimeout(resolve, this.options.startupSettleMs),
       );
     }
+  }
+
+  currentOutput(): string {
+    return cleanTerminalOutput(this.buffer);
   }
 
   async capture(command: string, timeoutMs = 10_000): Promise<string> {
