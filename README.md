@@ -1,7 +1,11 @@
 # agent-monitor
 
-An `htop`-style terminal dashboard for keeping an eye on your AI coding
-subscriptions and local agent usage in one place.
+A native macOS menu-bar monitor and `htop`-style terminal dashboard for keeping
+an eye on your AI coding subscriptions and local agent usage in one place.
+
+<p align="center">
+  <img src="docs/images/agent-monitor-menubar.png" width="440" alt="Agent Monitor showing Codex, Claude Code, Cursor, OpenCode, and Gemini CLI usage in the macOS menu bar">
+</p>
 
 `agent-monitor` currently supports **Codex**, **Claude Code**, **Cursor**,
 **OpenCode**, and **Gemini CLI**. It shows the information each provider
@@ -28,7 +32,8 @@ snapshot format, and renders those snapshots with
 ```text
 Provider CLIs ───────┐
 Local usage files ──┼─→ provider adapters ─→ snapshots ─┬─→ terminal UI
-Opt-in dashboards ──┘                                   └─→ local history
+Opt-in dashboards ──┘                                   ├─→ macOS menu bar
+                                                        └─→ local history
 ```
 
 | Provider | Data source | What is available |
@@ -103,7 +108,22 @@ agent-monitor
 The monitor begins collecting immediately and refreshes each provider at its
 own safe interval.
 
-### 5. Optionally connect provider dashboards
+### 5. Build the macOS menu-bar app
+
+The native app requires the macOS Command Line Tools and uses the same provider
+engine as the terminal dashboard:
+
+```sh
+pnpm build:macos
+open "build/Agent Monitor.app"
+```
+
+The local build runs directly from this checkout. If you move the app into
+`/Applications`, first make the CLI globally available with `pnpm link --global`.
+The app has no Dock icon: click its gauge icon in the menu bar to see providers,
+expand usage details, refresh immediately, or pause polling.
+
+### 6. Optionally connect provider dashboards
 
 CLI and local data work without browser access. Claude, Cursor, and OpenCode
 can expose additional subscription information through their web dashboards.
@@ -169,6 +189,9 @@ agent-monitor snapshot
 
 # Collect selected providers once
 agent-monitor --provider codex,opencode snapshot
+
+# Stream live state as JSON Lines (used by the native app)
+agent-monitor stream
 
 # Use a different configuration file
 agent-monitor --config ./my-config.json

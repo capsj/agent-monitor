@@ -1,6 +1,8 @@
 node_modules/
 dist/
 coverage/
+build/
+macos/.build/
 *.log
 .DS_Store
 *.sqlite3

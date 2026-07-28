@@ -20,6 +20,7 @@ import {
   type DashboardProvider,
 } from "./dashboard-auth.js";
 import { providerIds, type ProviderId } from "./types.js";
+import { streamMonitor } from "./stream.js";
 import { App } from "./ui/App.js";
 
 interface GlobalOptions {
@@ -124,6 +125,14 @@ program
     const config = configured(program.opts<GlobalOptions>());
     const snapshots = await collectSnapshot(config);
     process.stdout.write(`${JSON.stringify(snapshots, null, 2)}\n`);
+  });
+
+program
+  .command("stream")
+  .description("stream live monitor state as newline-delimited JSON")
+  .action(async () => {
+    const config = configured(program.opts<GlobalOptions>());
+    await streamMonitor(config);
   });
 
 program

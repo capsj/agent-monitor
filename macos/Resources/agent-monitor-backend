@@ -1,0 +1,26 @@
+#!/bin/zsh
+set -euo pipefail
+
+resource_dir="${0:A:h}"
+checkout_cli="$resource_dir/../../../../dist/cli.js"
+
+# Apps built in this checkout can run immediately without a global install.
+if [[ -f "$checkout_cli" ]]; then
+  node_path="${AGENT_MONITOR_NODE:-}"
+  if [[ -z "$node_path" && -f "$resource_dir/node-path" ]]; then
+    node_path="$(<"$resource_dir/node-path")"
+  fi
+  if [[ -z "$node_path" && -n "${NVM_BIN:-}" && -x "$NVM_BIN/node" ]]; then
+    node_path="$NVM_BIN/node"
+  fi
+  if [[ -z "$node_path" ]]; then
+    node_path="$(command -v node || true)"
+  fi
+  if [[ -n "$node_path" && -x "$node_path" ]]; then
+    exec "$node_path" "$checkout_cli" "$@"
+  fi
+fi
+
+# Apps moved elsewhere use the globally installed CLI. A login shell restores
+# the Homebrew/pnpm PATH that GUI applications do not normally inherit.
+exec /bin/zsh -lc 'exec agent-monitor "$@"' agent-monitor "$@"

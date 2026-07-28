@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
+    "build:macos": "./scripts/build-macos-app.sh",
     "auth": "tsx src/cli.tsx auth",
     "dev": "tsx src/cli.tsx",
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",
