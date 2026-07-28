@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderAdapter, ProviderSnapshot, UsageWindow } from "../types.js";
 import { nowIso } from "../types.js";
+import { formatWindowUsage } from "../utils/format.js";
 import { detectVersion } from "../utils/process.js";
 
 export function parseGeminiQuota(raw: string, version?: string): ProviderSnapshot {
@@ -59,7 +60,7 @@ export function parseGeminiQuota(raw: string, version?: string): ProviderSnapsho
     plan: joined.match(/\b(Free|Standard|Pro|Ultra|Enterprise)\b(?:\s+tier)?/i)?.[1] ?? null,
     summary:
       primary?.usedPercent !== undefined
-        ? `${primary.usedPercent.toFixed(0)}% ${primary.label.toLowerCase()} used`
+        ? `${formatWindowUsage(primary)} in ${primary.label.toLowerCase()}`
         : loginRequired
           ? "Not authenticated"
           : "Quota format not recognized",

@@ -112,11 +112,11 @@ describe("dashboard", () => {
     expect(frame).toContain("Codex");
     expect(frame).toContain("Plan");
     expect(frame).toContain("5-hour");
-    expect(frame).toContain("22%");
+    expect(frame).toContain("78% left");
     expect(frame).toContain("1-week");
-    expect(frame).toContain("41%");
+    expect(frame).toContain("59% left");
     expect(frame).toContain("Monthly");
-    expect(frame).toContain("12%");
+    expect(frame).toContain("88% left");
     expect(frame).toContain("Cursor");
   });
 

@@ -43,6 +43,11 @@ Collection runs independently for every provider. A provider failure therefore
 affects only its own card. Successful values remain visible as stale data when
 a later refresh fails, and repeated failures back off automatically.
 
+Plan gauges consistently show the percentage of quota left, regardless of how
+the provider reports usage. Green means ample quota remains; yellow and red
+indicate that the configured usage thresholds have been reached. Additional or
+overage gauges are explicitly labeled as used because they can exceed 100%.
+
 By default, lightweight snapshots are stored in a local SQLite database so the
 UI can calculate trends. Unchanged values are suppressed except for a
 five-minute heartbeat, and data older than 90 days is removed automatically.

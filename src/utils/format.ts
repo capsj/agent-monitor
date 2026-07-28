@@ -33,6 +33,28 @@ export function formatDuration(seconds: number): string {
   return `${(seconds / 86_400).toFixed(1)}d`;
 }
 
+export function remainingPercent(usedPercent: number): number {
+  return 100 - Math.max(0, Math.min(100, usedPercent));
+}
+
+export function formatWindowUsage(window: UsageWindow, fractionDigits = 0): string {
+  if (window.usedPercent === undefined) return "—";
+  if (window.category === "additional") {
+    return `${window.usedPercent.toFixed(fractionDigits)}% used`;
+  }
+  return `${remainingPercent(window.usedPercent).toFixed(fractionDigits)}% left`;
+}
+
+export function remainingSparkline(value: string): string {
+  const blocks = "▁▂▃▄▅▆▇█";
+  return [...value]
+    .map((block) => {
+      const index = blocks.indexOf(block);
+      return index < 0 ? block : blocks[blocks.length - index - 1];
+    })
+    .join("");
+}
+
 export function resetLabel(window: UsageWindow | undefined, now = Date.now()): string {
   if (!window) return "—";
   if (window.resetsAt) {
@@ -57,7 +79,7 @@ export function resetDetailLabel(window: UsageWindow, now = Date.now()): string 
 
 export function primaryUsage(snapshot: ProviderSnapshot): string {
   const window = snapshot.windows.find((item) => item.usedPercent !== undefined);
-  if (window?.usedPercent !== undefined) return `${window.usedPercent.toFixed(0)}% used`;
+  if (window?.usedPercent !== undefined) return formatWindowUsage(window);
   const metric =
     snapshot.metrics.find((item) => item.key.includes("cost")) ??
     snapshot.metrics.find((item) => item.key === "tokens") ??
@@ -69,7 +91,7 @@ export function includedUsage(snapshot: ProviderSnapshot): string {
   const window = snapshot.windows.find(
     (item) => item.category !== "additional" && item.usedPercent !== undefined,
   );
-  return window?.usedPercent === undefined ? "—" : `${window.usedPercent.toFixed(0)}% used`;
+  return window?.usedPercent === undefined ? "—" : formatWindowUsage(window);
 }
 
 export type UsagePeriod = "current" | "weekly" | "monthly";
@@ -153,7 +175,7 @@ export function additionalOrLocalUsage(snapshot: ProviderSnapshot): string {
     (window) => window.category === "additional" && window.usedPercent !== undefined,
   );
   if (additionalWindow?.usedPercent !== undefined) {
-    return `${additionalWindow.usedPercent.toFixed(0)}% extra`;
+    return formatWindowUsage(additionalWindow);
   }
 
   const local = snapshot.metrics.filter(

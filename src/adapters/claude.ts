@@ -10,6 +10,7 @@ import { join, resolve } from "node:path";
 import type { ProviderAdapter, ProviderSnapshot, UsageWindow } from "../types.js";
 import { claudeWorkspacePath } from "../config.js";
 import { DashboardSession } from "../dashboard-auth.js";
+import { formatWindowUsage } from "../utils/format.js";
 import { cleanTerminalOutput, detectVersion } from "../utils/process.js";
 import { parseClaudeDashboard } from "./dashboard-parsers.js";
 import { PtySession } from "./pty-session.js";
@@ -424,7 +425,7 @@ export function parseClaudeUsage(
     plan: claudePlan(raw),
     summary:
       primary?.usedPercent !== undefined
-        ? `${primary.usedPercent.toFixed(0)}% ${primary.label.toLowerCase()} used`
+        ? `${formatWindowUsage(primary)} in ${primary.label.toLowerCase()}`
         : loginRequired
           ? "Not authenticated"
           : trustRequired

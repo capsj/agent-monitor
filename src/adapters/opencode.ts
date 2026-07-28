@@ -1,5 +1,6 @@
 import type { ProviderAdapter, ProviderSnapshot } from "../types.js";
 import { nowIso } from "../types.js";
+import { formatWindowUsage } from "../utils/format.js";
 import { cleanTerminalOutput, detectVersion, runCommand } from "../utils/process.js";
 import { DashboardSession } from "../dashboard-auth.js";
 import { parseOpenCodeDashboard } from "./dashboard-parsers.js";
@@ -193,7 +194,7 @@ export class OpenCodeAdapter implements ProviderAdapter {
       summary:
         primary?.usedPercent === undefined
           ? local.summary
-          : `${primary.usedPercent.toFixed(0)}% ${primary.label.toLowerCase()} used`,
+          : `${formatWindowUsage(primary)} in ${primary.label.toLowerCase()}`,
       windows: dashboard.windows,
       metrics: [...dashboard.metrics, ...local.metrics],
       message: null,

@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import { z } from "zod";
 import type { ProviderAdapter, ProviderSnapshot, UsageWindow } from "../types.js";
 import { nowIso } from "../types.js";
+import { formatWindowUsage } from "../utils/format.js";
 import { detectVersion } from "../utils/process.js";
 
 const rateWindowSchema = z
@@ -337,7 +338,7 @@ export class CodexAdapter implements ProviderAdapter {
       plan,
       summary:
         primary?.usedPercent !== undefined
-          ? `${primary.usedPercent.toFixed(0)}% used`
+          ? formatWindowUsage(primary)
           : lifetime !== null
             ? `${lifetime.toLocaleString()} lifetime tokens`
             : "Authenticated; usage unavailable",

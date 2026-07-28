@@ -23,6 +23,10 @@ import {
   compactNumber,
   formatDuration,
   formatMetric,
+  formatWindowUsage,
+  primaryUsage,
+  remainingPercent,
+  remainingSparkline,
   resetDetailLabel,
   resetLabel,
   truncate,
@@ -85,10 +89,10 @@ function statusColor(status: ProviderSnapshot["status"] | "loading"): string {
   }
 }
 
-function usageColor(percent: number | undefined, config: MonitorConfig): string {
-  if (percent === undefined) return "gray";
-  if (percent >= config.criticalPercent) return "red";
-  if (percent >= config.warningPercent) return "yellow";
+function usageColor(usedPercent: number | undefined, config: MonitorConfig): string {
+  if (usedPercent === undefined) return "gray";
+  if (usedPercent >= config.criticalPercent) return "red";
+  if (usedPercent >= config.warningPercent) return "yellow";
   return "green";
 }
 
@@ -105,6 +109,12 @@ function useTrend(
   }, [snapshot, history]);
 }
 
+function trendUsesRemaining(snapshot: ProviderSnapshot | undefined, metricKey?: string): boolean {
+  if (!snapshot || !metricKey?.startsWith("window:")) return false;
+  const window = snapshot.windows.find((item) => item.id === metricKey.slice(7));
+  return window !== undefined && window.category !== "additional";
+}
+
 function WindowGauge({
   window,
   config,
@@ -116,13 +126,19 @@ function WindowGauge({
   now: number;
   compact: boolean;
 }) {
-  const percent = window.usedPercent;
+  const usedPercent = window.usedPercent;
+  const percent =
+    usedPercent === undefined
+      ? undefined
+      : window.category === "additional"
+        ? usedPercent
+        : remainingPercent(usedPercent);
   const barWidth = compact ? 8 : 12;
   const filled =
     percent === undefined
       ? 0
       : Math.max(0, Math.min(barWidth, Math.round((percent / 100) * barWidth)));
-  const color = usageColor(percent, config);
+  const color = usageColor(usedPercent, config);
   const reset = resetLabel(window, now);
   return (
     <Box marginRight={2}>
@@ -132,7 +148,7 @@ function WindowGauge({
         <Text color="gray">{"░".repeat(barWidth - filled)}</Text>
       </Text>
       <Text bold color={color}>
-        {" "}{percent === undefined ? "—" : `${percent.toFixed(0)}%`}
+        {" "}{percent === undefined ? "—" : formatWindowUsage(window)}
       </Text>
       {reset === "—" ? null : <Text color="gray"> · {reset}</Text>}
     </Box>
@@ -203,7 +219,12 @@ function ProviderSection({
   const trendText =
     trend.delta24h === undefined
       ? ""
-      : `24h ${trend.delta24h >= 0 ? "+" : ""}${trend.delta24h.toFixed(1)}`;
+      : (() => {
+          const delta = trendUsesRemaining(snapshot, trend.metricKey)
+            ? -trend.delta24h
+            : trend.delta24h;
+          return `24h ${delta >= 0 ? "+" : ""}${delta.toFixed(1)}`;
+        })();
   const additionalText = metricSummary(additionalMetrics, "additional", compact ? 2 : 4);
   const showLocal =
     planWindows.length === 0 ||
@@ -324,13 +345,17 @@ function DetailPanel({
       <Text bold>
         {snapshot.providerName} <Text color="gray">via {snapshot.source}</Text>
       </Text>
-      <Text>{snapshot.summary}</Text>
+      <Text>
+        {snapshot.windows.some((window) => window.usedPercent !== undefined)
+          ? primaryUsage(snapshot)
+          : snapshot.summary}
+      </Text>
       {includedWindows.length > 0 ? <Text bold color="cyan">Plan limits</Text> : null}
       {includedWindows.map((window) => (
         <Text key={window.id}>
           {window.label.padEnd(18)}{" "}
           <Text color={window.quality === "exact" ? "white" : "yellow"}>
-            {window.usedPercent === undefined ? "—" : `${window.usedPercent.toFixed(1)}% used`}
+            {formatWindowUsage(window, 1)}
           </Text>{" "}
           <Text color="gray">{resetDetailLabel(window, now)}</Text>
         </Text>
@@ -342,7 +367,7 @@ function DetailPanel({
         <Text key={window.id}>
           {window.label.padEnd(18)}{" "}
           <Text color={window.quality === "exact" ? "white" : "yellow"}>
-            {window.usedPercent === undefined ? "—" : `${window.usedPercent.toFixed(1)}% used`}
+            {formatWindowUsage(window, 1)}
           </Text>{" "}
           <Text color="gray">{resetDetailLabel(window, now)}</Text>
         </Text>
@@ -366,7 +391,11 @@ function DetailPanel({
       ))}
       {trend.sparkline ? (
         <Text>
-          7-day history      <Text color="cyan">{trend.sparkline}</Text>
+          7-day history      <Text color="cyan">
+            {trendUsesRemaining(snapshot, trend.metricKey)
+              ? remainingSparkline(trend.sparkline)
+              : trend.sparkline}
+          </Text>
         </Text>
       ) : null}
       {trend.estimatedTimeToLimitSec !== undefined ? (

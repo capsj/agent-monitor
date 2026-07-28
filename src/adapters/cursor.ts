@@ -1,6 +1,7 @@
 import type { ProviderAdapter, ProviderSnapshot } from "../types.js";
 import { DashboardSession } from "../dashboard-auth.js";
 import { nowIso } from "../types.js";
+import { formatWindowUsage } from "../utils/format.js";
 import { cleanTerminalOutput, detectVersion, runCommand } from "../utils/process.js";
 import { parseCursorDashboard } from "./dashboard-parsers.js";
 
@@ -82,7 +83,7 @@ export class CursorAdapter implements ProviderAdapter {
       summary:
         primary?.usedPercent === undefined
           ? cli.summary
-          : `${primary.usedPercent.toFixed(0)}% included used`,
+          : formatWindowUsage(primary),
       windows: dashboard.windows,
       metrics: dashboard.metrics,
       message:
