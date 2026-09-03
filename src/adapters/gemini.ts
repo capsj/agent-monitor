@@ -1,10 +1,12 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderAdapter, ProviderSnapshot, UsageWindow } from "../types.js";
 import { nowIso } from "../types.js";
+import { geminiWorkspacePath } from "../config.js";
 import { formatWindowUsage } from "../utils/format.js";
 import { detectVersion } from "../utils/process.js";
+import { PtySession } from "./pty-session.js";
 
 export function parseGeminiQuota(raw: string, version?: string): ProviderSnapshot {
   const lines = raw
@@ -49,6 +51,7 @@ export function parseGeminiQuota(raw: string, version?: string): ProviderSnapsho
     });
   }
   const loginRequired = /sign in|authentication|not logged in/i.test(joined);
+  const noApiCalls = /no api calls have been made in this session/i.test(joined);
   const usageWindows = [...windows.values()];
   const primary = usageWindows[0];
   return {
@@ -63,6 +66,8 @@ export function parseGeminiQuota(raw: string, version?: string): ProviderSnapsho
         ? `${formatWindowUsage(primary)} in ${primary.label.toLowerCase()}`
         : loginRequired
           ? "Not authenticated"
+          : noApiCalls
+            ? "Quota not available yet"
           : "Quota format not recognized",
     windows: usageWindows,
     metrics: [],
@@ -71,6 +76,8 @@ export function parseGeminiQuota(raw: string, version?: string): ProviderSnapsho
         ? null
         : loginRequired
           ? "Run gemini and sign in"
+          : noApiCalls
+            ? "Gemini did not return quota for this authentication method; local activity is still available"
           : "Gemini's model quota display changed or returned no quota buckets",
     version: version ?? null,
   };
@@ -81,19 +88,41 @@ export class GeminiAdapter implements ProviderAdapter {
   readonly name = "Gemini CLI";
   readonly defaultRefreshMs: number;
   private version?: string;
+  private readonly session: PtySession;
 
   constructor(
     private readonly executable = "gemini",
     refreshMs = 60_000,
+    private readonly timeoutMs = 15_000,
     private readonly sessionRoot = join(homedir(), ".gemini", "tmp"),
+    workspace = geminiWorkspacePath(),
   ) {
     this.defaultRefreshMs = refreshMs;
+    this.session = new PtySession(executable, {
+      args: ["--screen-reader", "--approval-mode", "plan", "--skip-trust"],
+      rows: 45,
+      cols: 120,
+      cwd: workspace,
+      startupTimeoutMs: timeoutMs,
+      startupSettleMs: 750,
+      inputDelayMs: 250,
+    });
+    mkdirSync(workspace, { recursive: true, mode: 0o700 });
   }
 
   async detect() {
     const result = await detectVersion(this.executable);
     this.version = result.version;
     return result;
+  }
+
+  async start(): Promise<void> {
+    const detected = await this.detect();
+    if (detected.available) await this.session.start();
+  }
+
+  async stop(): Promise<void> {
+    await this.session.stop("/quit");
   }
 
   async collect(): Promise<ProviderSnapshot> {
@@ -188,19 +217,47 @@ export class GeminiAdapter implements ProviderAdapter {
         category: "local",
       },
     ];
+    let quota: ProviderSnapshot | undefined;
+    let quotaError: string | undefined;
+    try {
+      const output = await this.session.capture("/stats", this.timeoutMs);
+      quota = parseGeminiQuota(output, this.version);
+      if (quota.windows.length === 0) quotaError = quota.message ?? undefined;
+    } catch (error) {
+      quotaError = error instanceof Error ? error.message : String(error);
+    }
+    const primary = quota?.windows[0];
     return {
       providerId: "gemini",
       providerName: "Gemini CLI",
       collectedAt: nowIso(),
-      status: "partial",
-      source: "local",
-      plan: null,
-      summary: `${total.toLocaleString()} tokens · ${files.length} sessions today`,
-      windows: [],
+      status: primary ? "ok" : "partial",
+      source: primary ? "hybrid" : "local",
+      plan: quota?.plan ?? null,
+      summary: primary
+        ? `${formatWindowUsage(primary)} in ${primary.label.toLowerCase()}`
+        : `${total.toLocaleString()} tokens · ${files.length} sessions today`,
+      windows: quota?.windows ?? [],
       metrics,
-      message:
-        "Gemini exposes quota only after an API response in the active session; passive monitoring shows local activity without consuming quota",
+      message: primary ? null : quotaError ?? "Gemini quota was not available",
       version: this.version ?? null,
+      sources: [
+        {
+          id: "gemini-quota",
+          label: "Model quota",
+          kind: "cli",
+          role: "primary",
+          state: primary ? "active" : "error",
+          message: primary ? undefined : quotaError,
+        },
+        {
+          id: "gemini-local",
+          label: "Local activity",
+          kind: "local",
+          role: "primary",
+          state: "active",
+        },
+      ],
     };
   }
 }

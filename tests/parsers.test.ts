@@ -13,8 +13,16 @@ import {
 } from "../src/adapters/dashboard-parsers.js";
 import { parseGeminiQuota } from "../src/adapters/gemini.js";
 import { parseOpenCodeStats } from "../src/adapters/opencode.js";
+import { dashboardContentReady } from "../src/dashboard-auth.js";
 
 describe("provider parsers", () => {
+  it("recognizes dashboard content before auto-closing the login window", () => {
+    expect(dashboardContentReady("cursor", "Current plan Pro\nCursor Models\n24% used")).toBe(true);
+    expect(dashboardContentReady("claude", "Plan usage limits\nCurrent session\n10% used")).toBe(true);
+    expect(dashboardContentReady("opencode", "Rolling Usage\n0%\nWeekly Usage\n3%")).toBe(true);
+    expect(dashboardContentReady("cursor", "Sign in to continue")).toBe(false);
+  });
+
   it("parses Claude session and weekly windows", () => {
     const snapshot = parseClaudeUsage(`
       Claude Pro
@@ -155,6 +163,14 @@ describe("provider parsers", () => {
         expect.objectContaining({ label: "Flash", usedPercent: 8 }),
       ]),
     );
+  });
+
+  it("explains when Gemini cannot return quota without an API call", () => {
+    const snapshot = parseGeminiQuota("No API calls have been made in this session.");
+
+    expect(snapshot.status).toBe("partial");
+    expect(snapshot.summary).toBe("Quota not available yet");
+    expect(snapshot.message).toContain("authentication method");
   });
 
   it("parses OpenCode local stats", () => {

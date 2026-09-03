@@ -23,6 +23,11 @@ struct MonitorPopover: View {
             header
             Divider()
 
+            if let authentication = store.authentication {
+                authenticationBanner(authentication)
+                Divider()
+            }
+
             if let error = store.errorMessage, store.snapshots.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "exclamationmark.triangle")
@@ -49,7 +54,10 @@ struct MonitorPopover: View {
                         ForEach(store.snapshots) { snapshot in
                             ProviderRow(
                                 snapshot: snapshot,
-                                refreshing: store.refreshing.contains(snapshot.providerId)
+                                refreshing: store.refreshing.contains(snapshot.providerId),
+                                authenticating: store.authentication?.isWorking == true,
+                                onRefresh: { store.refresh(providerId: snapshot.providerId) },
+                                onConnect: { store.connect(providerId: snapshot.providerId) }
                             )
                         }
                     }
@@ -64,6 +72,33 @@ struct MonitorPopover: View {
         .frame(width: 380, height: popoverHeight)
         .animation(.easeInOut(duration: 0.16), value: store.snapshots.count)
         .onAppear { store.ensureRunning() }
+    }
+
+    private func authenticationBanner(_ authentication: AuthenticationMessage) -> some View {
+        HStack(spacing: 10) {
+            if authentication.isWorking {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: authentication.status == "success" ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                    .foregroundStyle(authentication.status == "success" ? .green : .orange)
+            }
+            Text(authentication.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 6)
+            if authentication.isWorking {
+                Button("Cancel") { store.cancelAuthentication() }
+                    .controlSize(.small)
+            } else {
+                Button { store.dismissAuthentication() } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 
     private var header: some View {
@@ -125,7 +160,7 @@ struct MonitorPopover: View {
         let rowHeight: CGFloat = 54
         let rowSpacing = max(0, providerCount - 1) * 8
         let listPadding: CGFloat = 24
-        let headerAndFooter: CGFloat = 102
+        let headerAndFooter: CGFloat = 102 + (store.authentication == nil ? 0 : 62)
         let contentHeight = store.snapshots.isEmpty
             ? 190
             : providerCount * rowHeight + rowSpacing + listPadding

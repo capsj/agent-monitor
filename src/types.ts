@@ -35,6 +35,26 @@ export type MetricUnit = z.infer<typeof metricUnitSchema>;
 export const usageCategorySchema = z.enum(["included", "additional", "local"]);
 export type UsageCategory = z.infer<typeof usageCategorySchema>;
 
+export const providerSourceKindSchema = z.enum([
+  "structured",
+  "cli",
+  "local",
+  "api",
+  "browser",
+]);
+export type ProviderSourceKind = z.infer<typeof providerSourceKindSchema>;
+
+export const providerSourceStatusSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  kind: providerSourceKindSchema,
+  role: z.enum(["primary", "optional"]),
+  state: z.enum(["active", "available", "action-required", "expired", "error"]),
+  message: z.string().nullable().optional(),
+  action: z.enum(["connect-dashboard", "reconnect-dashboard"]).optional(),
+});
+export type ProviderSourceStatus = z.infer<typeof providerSourceStatusSchema>;
+
 export const metricSchema = z.object({
   key: z.string(),
   label: z.string(),
@@ -64,13 +84,14 @@ export const providerSnapshotSchema = z.object({
   providerName: z.string(),
   collectedAt: z.string().datetime(),
   status: snapshotStatusSchema,
-  source: z.enum(["structured", "cli", "local", "browser", "hybrid"]),
+  source: z.enum(["structured", "cli", "local", "api", "browser", "hybrid"]),
   plan: z.string().nullable().optional(),
   summary: z.string(),
   windows: z.array(usageWindowSchema).default([]),
   metrics: z.array(metricSchema).default([]),
   message: z.string().nullable().optional(),
   version: z.string().nullable().optional(),
+  sources: z.array(providerSourceStatusSchema).optional(),
 });
 export type ProviderSnapshot = z.infer<typeof providerSnapshotSchema>;
 
@@ -87,8 +108,13 @@ export interface ProviderAdapter {
   readonly defaultRefreshMs: number;
   detect(): Promise<DetectionResult>;
   start?(): Promise<void>;
-  collect(): Promise<ProviderSnapshot>;
+  collect(context?: CollectionContext): Promise<ProviderSnapshot>;
   stop?(): Promise<void>;
+}
+
+export interface CollectionContext {
+  reason: "scheduled" | "manual";
+  force: boolean;
 }
 
 export interface TrendSummary {

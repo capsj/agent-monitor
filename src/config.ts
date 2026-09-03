@@ -40,6 +40,7 @@ const configSchema = z.object({
   criticalPercent: z.number().min(0).max(100).default(90),
   retentionDays: z.number().int().min(1).default(90),
   historyEnabled: z.boolean().default(true),
+  reuseProviderCredentials: z.boolean().default(true),
   collectionTimeoutMs: z.number().int().min(1000).default(15_000),
 });
 
@@ -68,6 +69,15 @@ export function cacheDirectory(): string {
 
 export function claudeWorkspacePath(): string {
   return join(cacheDirectory(), "claude-workspace");
+}
+
+export function geminiWorkspacePath(): string {
+  return join(cacheDirectory(), "gemini-workspace");
+}
+
+export function opencodeAuthPath(): string {
+  const base = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
+  return join(base, "opencode", "auth.json");
 }
 
 export function historyPath(): string {

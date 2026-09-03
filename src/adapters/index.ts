@@ -23,10 +23,12 @@ export function createAdapters(config: MonitorConfig): ProviderAdapter[] {
       config.executables.opencode,
       config.refreshSeconds.opencode * 1000,
       config.collectionTimeoutMs,
+      config.reuseProviderCredentials,
     ),
     new GeminiAdapter(
       config.executables.gemini,
       config.refreshSeconds.gemini * 1000,
+      config.collectionTimeoutMs,
     ),
   ];
   return all.filter((adapter) => config.enabledProviders.includes(adapter.id));

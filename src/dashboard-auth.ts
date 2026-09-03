@@ -43,7 +43,7 @@ const definitions: Record<DashboardProvider, DashboardDefinition> = {
   opencode: {
     label: "OpenCode",
     startUrl: "https://opencode.ai/",
-    instruction: "Sign in, open the workspace Go or Billing page, then close Chrome.",
+    instruction: "Sign in and open the workspace Go or Billing page. This window closes automatically when connected.",
     dashboardUrl: (url) =>
       (url.hostname === "opencode.ai" || url.hostname === "console.opencode.ai") &&
       /\/workspace\/[^/]+\/(?:go|billing)/.test(url.pathname),
@@ -51,7 +51,7 @@ const definitions: Record<DashboardProvider, DashboardDefinition> = {
   claude: {
     label: "Claude",
     startUrl: "https://claude.ai/new#settings/usage",
-    instruction: "Sign in, open Settings → Usage, then close Chrome.",
+    instruction: "Sign in and open Settings → Usage. This window closes automatically when connected.",
     dashboardUrl: (url) =>
       url.hostname === "claude.ai" &&
       (
@@ -62,7 +62,7 @@ const definitions: Record<DashboardProvider, DashboardDefinition> = {
   cursor: {
     label: "Cursor",
     startUrl: "https://cursor.com/dashboard",
-    instruction: "Sign in, open the dashboard Usage page, then close Chrome.",
+    instruction: "Sign in and open the dashboard Usage page. This window closes automatically when connected.",
     dashboardUrl: (url) =>
       (url.hostname === "cursor.com" || url.hostname === "www.cursor.com") &&
       url.pathname.startsWith("/dashboard"),
@@ -97,8 +97,8 @@ export function dashboardAuthInstruction(
 ): string {
   if (mode === "personal") {
     const navigation = definitions[provider].instruction.replace(
-      /,\s*then close Chrome\.$/,
-      ".",
+      /\s*This window closes automatically when connected\.$/,
+      "",
     );
     return `${navigation} Keep that tab open for live updates.`;
   }
@@ -326,6 +326,18 @@ function loginScreen(text: string): boolean {
   );
 }
 
+export function dashboardContentReady(provider: DashboardProvider, text: string): boolean {
+  if (!text.trim()) return false;
+  switch (provider) {
+    case "claude":
+      return /\b(?:plan usage limits?|current session|weekly limits?|usage credits?)\b/i.test(text);
+    case "cursor":
+      return /\b(?:current plan|included usage|cursor models|other models|on-demand)\b/i.test(text);
+    case "opencode":
+      return /\b(?:rolling usage|weekly usage|monthly usage|current balance)\b/i.test(text);
+  }
+}
+
 async function readPersonalDashboard(
   provider: DashboardProvider,
   preferredUrl?: string,
@@ -411,8 +423,9 @@ async function authenticateDashboardUnlocked(
   };
   signal?.addEventListener("abort", abort, { once: true });
   let selectedUrl: string | undefined;
-  const closed = new Promise<void>((resolve) => {
-    context.once("close", () => resolve());
+  let contextClosed = false;
+  context.once("close", () => {
+    contextClosed = true;
   });
 
   const observe = (page: Page): void => {
@@ -434,28 +447,40 @@ async function authenticateDashboardUnlocked(
       timeout: 30_000,
     });
   } catch (error) {
+    signal?.removeEventListener("abort", abort);
     await context.close().catch(() => undefined);
     throw error;
   }
   if (isDashboardUrl(provider, page.url())) selectedUrl = page.url();
 
-  const observer = setInterval(() => {
-    for (const openPage of context.pages()) {
-      if (isDashboardUrl(provider, openPage.url())) selectedUrl = openPage.url();
+  const deadline = Date.now() + 5 * 60_000;
+  try {
+    while (!contextClosed && Date.now() < deadline) {
+      if (signal?.aborted) throw new Error("Dashboard authentication cancelled");
+      for (const openPage of context.pages()) {
+        if (!isDashboardUrl(provider, openPage.url())) continue;
+        selectedUrl = openPage.url();
+        const text = await openPage
+          .locator("body")
+          .innerText({ timeout: 1_500 })
+          .catch(() => "");
+        if (!dashboardContentReady(provider, text)) continue;
+        saveMetadata(provider, selectedUrl, "isolated");
+        await context.close().catch(() => undefined);
+        return selectedUrl;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
     }
-  }, 500);
-  observer.unref();
-  await closed;
-  clearInterval(observer);
-  signal?.removeEventListener("abort", abort);
-  if (signal?.aborted) throw new Error("Dashboard authentication cancelled");
-  if (!selectedUrl) {
-    throw new Error(
-      `No ${definition.label} usage page was detected. Sign in, open its usage or billing page, then close Chrome.`,
-    );
+  } finally {
+    signal?.removeEventListener("abort", abort);
   }
-  saveMetadata(provider, selectedUrl, "isolated");
-  return selectedUrl;
+  if (signal?.aborted) throw new Error("Dashboard authentication cancelled");
+  await context.close().catch(() => undefined);
+  throw new Error(
+    selectedUrl
+      ? `${definition.label} opened, but its usage data was not available. Finish signing in and try again.`
+      : `No ${definition.label} usage page was detected. Sign in and open its usage or billing page.`,
+  );
 }
 
 export function authenticateDashboard(
@@ -479,15 +504,16 @@ export class DashboardSession {
     private readonly cacheMs = 60_000,
   ) {}
 
-  async read(): Promise<DashboardReadResult> {
-    if (this.cached && Date.now() - this.cached.at < this.cacheMs) {
+  async read(force = false): Promise<DashboardReadResult> {
+    if (force) this.cached = undefined;
+    if (!force && this.cached && Date.now() - this.cached.at < this.cacheMs) {
       return this.cached.result;
     }
     const metadata = readDashboardMetadata(this.provider);
     if (!metadata) {
       return {
         status: "not-configured",
-        message: `Run agent-monitor auth ${this.provider} to connect dashboard usage`,
+        message: `Connect the ${definitions[this.provider].label} dashboard to add usage data`,
       };
     }
     if ((metadata.mode ?? "isolated") === "personal") {

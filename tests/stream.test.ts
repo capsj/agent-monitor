@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { monitorStateMessage } from "../src/stream.js";
+import { monitorStateMessage, parseStreamCommand } from "../src/stream.js";
 import type { MonitorState, ProviderSnapshot } from "../src/types.js";
 
 const snapshot: ProviderSnapshot = {
@@ -41,5 +41,33 @@ describe("monitor state stream", () => {
       type: "state",
       snapshots: [{ providerId: "codex" }],
     });
+  });
+
+  it("accepts provider refresh and managed dashboard authentication commands", () => {
+    expect(parseStreamCommand('{"action":"refresh","providerId":"cursor"}')).toEqual({
+      action: "refresh",
+      providerId: "cursor",
+    });
+    expect(
+      parseStreamCommand(
+        '{"action":"authenticateDashboard","providerId":"cursor","mode":"isolated"}',
+      ),
+    ).toEqual({
+      action: "authenticateDashboard",
+      providerId: "cursor",
+      mode: "isolated",
+    });
+    expect(parseStreamCommand('{"action":"cancelAuthentication"}')).toEqual({
+      action: "cancelAuthentication",
+    });
+  });
+
+  it("ignores unsupported authentication providers", () => {
+    expect(
+      parseStreamCommand(
+        '{"action":"authenticateDashboard","providerId":"gemini","mode":"isolated"}',
+      ),
+    ).toBeUndefined();
+    expect(parseStreamCommand('{"action":"refresh","providerId":"unknown"}')).toBeUndefined();
   });
 });

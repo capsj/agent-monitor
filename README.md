@@ -39,10 +39,10 @@ Opt-in dashboards ──┘                                   ├─→ macOS me
 | Provider | Data source | What is available |
 | --- | --- | --- |
 | Codex | Local Codex app-server JSON-RPC | Account windows, reset times, credits, plan, and token history |
-| Claude Code | Built-in `/usage` screen; optional dashboard | Session and weekly limits; connected dashboard credits and balance |
-| Cursor | `cursor-agent status/about`; optional dashboard | Authentication and plan health; connected dashboard usage |
-| OpenCode | `opencode stats`; optional dashboard | Local activity and estimated cost; connected Go limits and balance |
-| Gemini CLI | Local Gemini session metadata | Today's sessions and numeric token totals |
+| Claude Code | Built-in `/usage` screen; optional managed dashboard | Session and weekly limits; connected dashboard credits and balance |
+| Cursor | `cursor-agent status/about`; managed dashboard | Authentication, plan health, and personal usage |
+| OpenCode | `opencode stats`; Go usage API; optional managed dashboard | Local activity, Go limits, estimated cost, and connected balance |
+| Gemini CLI | Built-in `/stats`; local session metadata | Model quota when exposed, plus today's sessions and token totals |
 
 Collection runs independently for every provider. A provider failure therefore
 affects only its own card. Successful values remain visible as stale data when
@@ -68,7 +68,7 @@ You will need:
 - Node.js 22.12 or newer
 - [pnpm](https://pnpm.io/)
 - At least one supported provider CLI, already installed and authenticated
-- Google Chrome or Chromium only if you want to connect optional dashboards
+- Google Chrome or Chromium only for Cursor personal usage or optional billing details
 
 You do not need every provider CLI. Missing providers simply appear as
 unavailable, and you can disable them in the configuration.
@@ -121,13 +121,14 @@ open "build/Agent Monitor.app"
 The local build runs directly from this checkout. If you move the app into
 `/Applications`, first make the CLI globally available with `pnpm link --global`.
 The app has no Dock icon: click its gauge icon in the menu bar to see providers,
-expand usage details, refresh immediately, or pause polling.
+expand usage details, connect or reconnect dashboard-backed fields, refresh one
+provider or all providers, or pause polling.
 
 ### 6. Optionally connect provider dashboards
 
-CLI and local data work without browser access. Claude, Cursor, and OpenCode
-can expose additional subscription information through their web dashboards.
-Connecting one is explicit and optional:
+Most usage loads without browser access. Cursor personal usage and optional
+Claude/OpenCode billing details come from managed web sessions. Connecting one
+is explicit:
 
 ```sh
 agent-monitor auth claude
@@ -135,9 +136,10 @@ agent-monitor auth cursor
 agent-monitor auth opencode
 ```
 
-The command opens an isolated Chrome profile. Sign in, navigate to the
-requested usage or billing page, and close Chrome. The saved profile is reused
-headlessly on later runs.
+The command opens an isolated Chrome profile. Sign in and navigate to the
+requested usage or billing page; the window closes automatically once the
+connection is ready. The saved profile is reused headlessly on later runs, so
+no dashboard tab needs to remain open or be refreshed manually.
 
 You can also connect a dashboard from inside the monitor: select its provider
 and press `a`.
@@ -235,6 +237,7 @@ Example:
   "criticalPercent": 90,
   "retentionDays": 90,
   "historyEnabled": true,
+  "reuseProviderCredentials": true,
   "collectionTimeoutMs": 15000
 }
 ```
@@ -252,6 +255,9 @@ own data:
   history, logs, or snapshots.
 - Codex credentials remain inside Codex; the monitor communicates with the
   already-authenticated local app-server.
+- For OpenCode Go, the monitor reads only OpenCode's own `opencode-go` API-key
+  record in memory and sends it only to `https://opencode.ai` for the read-only
+  usage request. Set `reuseProviderCredentials` to `false` to disable this.
 - Claude terminal output and dashboard text are kept in memory only long enough
   to extract an allowlist of usage values.
 - Gemini files are inspected only for session filenames and numeric `tokens`

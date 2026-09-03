@@ -17,6 +17,7 @@ const config: MonitorConfig = {
   criticalPercent: 90,
   retentionDays: 90,
   historyEnabled: false,
+  reuseProviderCredentials: true,
   collectionTimeoutMs: 15_000,
 };
 
@@ -87,7 +88,9 @@ describe("monitor engine", () => {
     const stale = engine.getState().snapshots.get("codex");
     expect(stale?.status).toBe("stale");
     expect(stale?.summary).toBe("10% used");
-    expect(stale?.windows).toEqual(goodSnapshot.windows);
+    expect(stale?.windows).toEqual([
+      expect.objectContaining({ id: "primary", usedPercent: 10, quality: "stale" }),
+    ]);
     expect(stale?.collectedAt).toBe(goodSnapshot.collectedAt);
     expect(stale?.message).toContain("temporarily unavailable");
     await engine.stop();

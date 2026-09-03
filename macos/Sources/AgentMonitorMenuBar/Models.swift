@@ -87,6 +87,24 @@ struct Metric: Decodable, Identifiable {
     }
 }
 
+struct ProviderSourceStatus: Decodable, Identifiable {
+    let id: String
+    let label: String
+    let kind: String
+    let role: String
+    let state: String
+    let message: String?
+    let action: String?
+
+    var actionLabel: String? {
+        switch action {
+        case "connect-dashboard": "Connect"
+        case "reconnect-dashboard": "Reconnect"
+        default: nil
+        }
+    }
+}
+
 struct ProviderSnapshot: Decodable, Identifiable {
     let providerId: String
     let providerName: String
@@ -99,6 +117,7 @@ struct ProviderSnapshot: Decodable, Identifiable {
     let metrics: [Metric]
     let message: String?
     let version: String?
+    let sources: [ProviderSourceStatus]?
 
     var id: String { providerId }
 
@@ -129,6 +148,16 @@ struct ProviderSnapshot: Decodable, Identifiable {
         default: .red
         }
     }
+}
+
+struct AuthenticationMessage: Decodable {
+    let type: String
+    let providerId: String
+    let mode: String
+    let status: String
+    let message: String
+
+    var isWorking: Bool { status == "working" }
 }
 
 struct MonitorStateMessage: Decodable {

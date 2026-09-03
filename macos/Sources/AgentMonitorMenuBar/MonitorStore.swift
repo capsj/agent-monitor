@@ -8,6 +8,7 @@ final class MonitorStore: ObservableObject {
     @Published private(set) var paused = false
     @Published private(set) var connected = false
     @Published private(set) var errorMessage: String?
+    @Published private(set) var authentication: AuthenticationMessage?
 
     private var process: Process?
     private var input: Pipe?
@@ -37,6 +38,28 @@ final class MonitorStore: ObservableObject {
 
     func refresh() {
         send(action: "refresh")
+    }
+
+    func refresh(providerId: String) {
+        send(["action": "refresh", "providerId": providerId])
+    }
+
+    func connect(providerId: String) {
+        authentication = nil
+        send([
+            "action": "authenticateDashboard",
+            "providerId": providerId,
+            "mode": "isolated",
+        ])
+    }
+
+    func cancelAuthentication() {
+        send(action: "cancelAuthentication")
+    }
+
+    func dismissAuthentication() {
+        guard authentication?.isWorking != true else { return }
+        authentication = nil
     }
 
     func togglePause() {
@@ -112,10 +135,17 @@ final class MonitorStore: ObservableObject {
             let line = outputBuffer[..<newline]
             outputBuffer.removeSubrange(...newline)
             guard !line.isEmpty,
-                  let message = try? JSONDecoder().decode(MonitorStateMessage.self, from: Data(line)) else {
+                  let type = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  let messageType = type["type"] as? String else {
                 continue
             }
-            apply(message)
+            if messageType == "state",
+               let message = try? JSONDecoder().decode(MonitorStateMessage.self, from: Data(line)) {
+                apply(message)
+            } else if messageType == "authentication",
+                      let message = try? JSONDecoder().decode(AuthenticationMessage.self, from: Data(line)) {
+                authentication = message
+            }
         }
     }
 
@@ -133,7 +163,12 @@ final class MonitorStore: ObservableObject {
     }
 
     private func send(action: String) {
-        guard let data = "{\"action\":\"\(action)\"}\n".data(using: .utf8) else { return }
+        send(["action": action])
+    }
+
+    private func send(_ payload: [String: String]) {
+        guard var data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        data.append(0x0A)
         do {
             try input?.fileHandleForWriting.write(contentsOf: data)
         } catch {
@@ -145,6 +180,7 @@ final class MonitorStore: ObservableObject {
         process = nil
         input = nil
         connected = false
+        authentication = nil
         if !stopping {
             let backendMessage = backendStderr.trimmingCharacters(in: .whitespacesAndNewlines)
             if !backendMessage.isEmpty {

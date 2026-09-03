@@ -1,5 +1,5 @@
-import type { ProviderAdapter, ProviderSnapshot } from "../types.js";
-import { DashboardSession } from "../dashboard-auth.js";
+import type { CollectionContext, ProviderAdapter, ProviderSnapshot } from "../types.js";
+import { DashboardSession, dashboardAuthStatus } from "../dashboard-auth.js";
 import { nowIso } from "../types.js";
 import { formatWindowUsage } from "../utils/format.js";
 import { cleanTerminalOutput, detectVersion, runCommand } from "../utils/process.js";
@@ -51,20 +51,44 @@ export class CursorAdapter implements ProviderAdapter {
     return result;
   }
 
-  async collect(): Promise<ProviderSnapshot> {
+  async collect(context?: CollectionContext): Promise<ProviderSnapshot> {
     if (!this.version) await this.detect();
     const [status, about, dashboardResult] = await Promise.all([
       runCommand(this.executable, ["status"], { timeoutMs: this.timeoutMs }),
       runCommand(this.executable, ["about"], { timeoutMs: this.timeoutMs }),
-      this.dashboard.read(),
+      this.dashboard.read(context?.force),
     ]);
     if (status.timedOut || about.timedOut) throw new Error("Cursor account check timed out");
     const output = `${status.stdout}\n${status.stderr}\n${about.stdout}\n${about.stderr}`;
     const cli = parseCursorAbout(output, this.version);
+    const configured = dashboardAuthStatus("cursor").configured;
     if (dashboardResult.status !== "ok") {
       return {
         ...cli,
         message: dashboardResult.message,
+        sources: [
+          {
+            id: "cursor-account",
+            label: "Account",
+            kind: "cli",
+            role: "primary",
+            state: cli.status === "unavailable" ? "error" : "active",
+          },
+          {
+            id: "cursor-usage",
+            label: "Personal usage",
+            kind: "browser",
+            role: "primary",
+            state:
+              dashboardResult.status === "not-configured"
+                ? "action-required"
+                : dashboardResult.status === "authentication-required"
+                  ? "expired"
+                  : "error",
+            message: dashboardResult.message,
+            action: configured ? "reconnect-dashboard" : "connect-dashboard",
+          },
+        ],
       };
     }
     const dashboard = parseCursorDashboard(dashboardResult.text);
@@ -90,6 +114,28 @@ export class CursorAdapter implements ProviderAdapter {
         dashboard.windows.length > 0 || dashboard.metrics.length > 0
           ? null
           : "Cursor plan detected; usage format was not recognized",
+      sources: [
+        {
+          id: "cursor-account",
+          label: "Account",
+          kind: "cli",
+          role: "primary",
+          state: "active",
+        },
+        {
+          id: "cursor-usage",
+          label: "Personal usage",
+          kind: "browser",
+          role: "primary",
+          state: primary ? "active" : "error",
+          ...(primary
+            ? {}
+            : {
+                message: "Dashboard format was not recognized",
+                action: "reconnect-dashboard" as const,
+              }),
+        },
+      ],
     };
   }
 

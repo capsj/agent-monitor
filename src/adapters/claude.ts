@@ -7,9 +7,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import type { ProviderAdapter, ProviderSnapshot, UsageWindow } from "../types.js";
+import type {
+  CollectionContext,
+  ProviderAdapter,
+  ProviderSnapshot,
+  ProviderSourceStatus,
+  UsageWindow,
+} from "../types.js";
 import { claudeWorkspacePath } from "../config.js";
-import { DashboardSession } from "../dashboard-auth.js";
+import { DashboardSession, dashboardAuthStatus } from "../dashboard-auth.js";
 import { formatWindowUsage } from "../utils/format.js";
 import { cleanTerminalOutput, detectVersion } from "../utils/process.js";
 import { parseClaudeDashboard } from "./dashboard-parsers.js";
@@ -498,7 +504,7 @@ export class ClaudeAdapter implements ProviderAdapter {
     ]);
   }
 
-  async collect(): Promise<ProviderSnapshot> {
+  async collect(context?: CollectionContext): Promise<ProviderSnapshot> {
     if (!this.version) {
       const detected = await this.detect();
       this.version = detected.version;
@@ -506,7 +512,7 @@ export class ClaudeAdapter implements ProviderAdapter {
     await this.prepareSession();
     const [output, dashboardResult] = await Promise.all([
       this.captureUsage(),
-      this.dashboard.read(),
+      this.dashboard.read(context?.force),
     ]);
     const parsedCli = parseClaudeUsage(output, this.version);
     if (parsedCli.plan) this.plan = parsedCli.plan;
@@ -514,26 +520,60 @@ export class ClaudeAdapter implements ProviderAdapter {
       ...parsedCli,
       plan: parsedCli.plan ?? this.plan ?? null,
     };
+    const dashboardConnection = dashboardAuthStatus("claude");
+    const cliSource: ProviderSourceStatus = {
+      id: "claude-usage",
+      label: "Plan limits",
+      kind: "cli",
+      role: "primary",
+      state: cli.status === "ok" ? "active" : "error",
+      message: cli.message,
+    };
     if (dashboardResult.status !== "ok") {
+      const dashboardSource: ProviderSourceStatus = {
+        id: "claude-billing",
+        label: "Billing details",
+        kind: "browser",
+        role: "optional",
+        state:
+          dashboardResult.status === "not-configured"
+            ? "available"
+            : dashboardResult.status === "authentication-required"
+              ? "expired"
+              : "error",
+        message: dashboardResult.message,
+        action:
+          dashboardResult.status === "authentication-required"
+            ? "reconnect-dashboard"
+            : "connect-dashboard",
+      };
       return {
         ...cli,
-        status:
-          dashboardResult.status === "not-configured" || cli.status !== "ok"
-            ? cli.status
-            : "partial",
-        message:
-          cli.message ??
-          (dashboardResult.status === "not-configured"
-            ? "Run agent-monitor auth claude to add usage-credit balance"
-            : dashboardResult.message),
+        status: cli.status,
+        message: cli.message,
+        sources: [cliSource, dashboardSource],
       };
     }
     const dashboard = parseClaudeDashboard(dashboardResult.text);
     if (!dashboard) {
       return {
         ...cli,
-        status: cli.status === "ok" ? "partial" : cli.status,
-        message: cli.message ?? "Claude billing dashboard did not expose usage-credit details",
+        status: cli.status,
+        message: cli.message,
+        sources: [
+          cliSource,
+          {
+            id: "claude-billing",
+            label: "Billing details",
+            kind: "browser",
+            role: "optional",
+            state: "error",
+            message: "Dashboard format was not recognized",
+            action: dashboardConnection.configured
+              ? "reconnect-dashboard"
+              : "connect-dashboard",
+          },
+        ],
       };
     }
     const includedWindows = cli.windows.filter((window) => window.category !== "additional");
@@ -545,6 +585,16 @@ export class ClaudeAdapter implements ProviderAdapter {
       windows: [...includedWindows, ...dashboard.windows],
       metrics: [...dashboard.metrics, ...cliNonAdditional],
       message: cli.message,
+      sources: [
+        cliSource,
+        {
+          id: "claude-billing",
+          label: "Billing details",
+          kind: "browser",
+          role: "optional",
+          state: "active",
+        },
+      ],
     };
   }
 

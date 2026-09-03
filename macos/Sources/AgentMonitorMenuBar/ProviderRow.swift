@@ -3,6 +3,9 @@ import SwiftUI
 struct ProviderRow: View {
     let snapshot: ProviderSnapshot
     let refreshing: Bool
+    let authenticating: Bool
+    let onRefresh: () -> Void
+    let onConnect: () -> Void
     @State private var expanded = false
 
     var body: some View {
@@ -75,9 +78,32 @@ struct ProviderRow: View {
                             .foregroundStyle(snapshot.status == "error" ? .red : .orange)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    if let source = snapshot.sources?.first(where: { $0.actionLabel != nil }) {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(source.label).fontWeight(.medium)
+                                if let message = source.message, !message.isEmpty {
+                                    Text(message)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                            }
+                            .font(.caption)
+                            Spacer()
+                            Button(source.actionLabel ?? "Connect") { onConnect() }
+                                .controlSize(.small)
+                                .disabled(authenticating)
+                        }
+                    }
                     HStack {
-                        Text("via \(snapshot.source)")
+                        Text(sourceDescription)
                         Spacer()
+                        Button { onRefresh() } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(refreshing)
+                        .help("Refresh \(snapshot.providerName)")
                         if let date = ISO8601DateFormatter().date(from: snapshot.collectedAt) {
                             Text(date.formatted(date: .omitted, time: .shortened))
                         }
@@ -91,6 +117,14 @@ struct ProviderRow: View {
             }
         }
         .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var sourceDescription: String {
+        let active = snapshot.sources?
+            .filter { $0.state == "active" }
+            .map(\.kind)
+        guard let active, !active.isEmpty else { return "via \(snapshot.source)" }
+        return "via \(Array(Set(active)).sorted().joined(separator: " + "))"
     }
 
     @ViewBuilder

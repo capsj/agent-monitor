@@ -19,6 +19,7 @@ const config: MonitorConfig = {
   criticalPercent: 90,
   retentionDays: 90,
   historyEnabled: false,
+  reuseProviderCredentials: true,
   collectionTimeoutMs: 15_000,
 };
 

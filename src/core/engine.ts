@@ -101,7 +101,10 @@ export class MonitorEngine {
     this.emit();
     let failed = false;
     try {
-      const collected = await adapter.collect();
+      const collected = await adapter.collect({
+        reason: manual ? "manual" : "scheduled",
+        force: manual,
+      });
       failed = collected.status === "error";
       const snapshot = failed
         ? this.staleOrError(id, collected)
@@ -174,12 +177,12 @@ export class MonitorEngine {
 
     const collectedWindowIds = new Set(collected.windows.map((window) => window.id));
     const collectedMetricKeys = new Set(collected.metrics.map((metric) => metric.key));
-    const missingWindows = previous.windows.filter(
-      (window) => !collectedWindowIds.has(window.id),
-    );
-    const missingMetrics = previous.metrics.filter(
-      (metric) => !collectedMetricKeys.has(metric.key),
-    );
+    const missingWindows = previous.windows
+      .filter((window) => !collectedWindowIds.has(window.id))
+      .map((window) => ({ ...window, quality: "stale" as const }));
+    const missingMetrics = previous.metrics
+      .filter((metric) => !collectedMetricKeys.has(metric.key))
+      .map((metric) => ({ ...metric, quality: "stale" as const }));
     if (missingWindows.length === 0 && missingMetrics.length === 0) return collected;
 
     return {
