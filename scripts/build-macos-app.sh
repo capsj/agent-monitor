@@ -19,6 +19,7 @@ mkdir -p "$macos_dir" "$resources_dir"
 cp "$swift_bin_dir/AgentMonitorMenuBar" "$macos_dir/AgentMonitorMenuBar"
 cp "$repo_dir/macos/Resources/Info.plist" "$contents_dir/Info.plist"
 cp "$repo_dir/macos/Resources/agent-monitor-backend" "$resources_dir/agent-monitor-backend"
+cp "$repo_dir/macos/Resources/AppIcon.icns" "$resources_dir/AppIcon.icns"
 node_path="$(command -v node)"
 print -r -- "$node_path" > "$resources_dir/node-path"
 # Remember where this checkout's CLI lives so the app keeps working after it is

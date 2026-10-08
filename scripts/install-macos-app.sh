@@ -10,6 +10,10 @@ target="/Applications/$app_name"
 
 # Quit a running copy so the new bundle is picked up.
 osascript -e 'tell application "Agent Monitor" to quit' >/dev/null 2>&1 || true
+for _ in {1..50}; do
+  pgrep -x AgentMonitorMenuBar >/dev/null || break
+  sleep 0.1
+done
 if [[ -e "$target" ]]; then
   rm -rf -- "$target"
 fi
