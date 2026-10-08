@@ -94,20 +94,13 @@ struct ProviderSourceStatus: Decodable, Identifiable {
     let role: String
     let state: String
     let message: String?
-    let action: String?
-
-    var actionLabel: String? {
-        switch action {
-        case "connect-dashboard": "Connect"
-        case "reconnect-dashboard": "Reconnect"
-        default: nil
-        }
-    }
 }
 
 struct ProviderSnapshot: Decodable, Identifiable {
     let providerId: String
     let providerName: String
+    let accountId: String?
+    let accountLabel: String?
     let collectedAt: String
     let status: String
     let source: String
@@ -119,7 +112,16 @@ struct ProviderSnapshot: Decodable, Identifiable {
     let version: String?
     let sources: [ProviderSourceStatus]?
 
-    var id: String { providerId }
+    /// Matches the backend's snapshot key: `provider` or `provider:account`.
+    var id: String {
+        if let accountId { return "\(providerId):\(accountId)" }
+        return providerId
+    }
+
+    var displayName: String {
+        if let accountLabel { return "\(providerName) · \(accountLabel)" }
+        return providerName
+    }
 
     var primaryWindow: UsageWindow? {
         windows.first { !$0.isAdditional && $0.usedPercent != nil }
@@ -148,16 +150,6 @@ struct ProviderSnapshot: Decodable, Identifiable {
         default: .red
         }
     }
-}
-
-struct AuthenticationMessage: Decodable {
-    let type: String
-    let providerId: String
-    let mode: String
-    let status: String
-    let message: String
-
-    var isWorking: Bool { status == "working" }
 }
 
 struct MonitorStateMessage: Decodable {

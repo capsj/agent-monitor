@@ -3,15 +3,14 @@ import SwiftUI
 struct ProviderRow: View {
     let snapshot: ProviderSnapshot
     let refreshing: Bool
-    let authenticating: Bool
+    let expanded: Bool
+    let onToggle: () -> Void
     let onRefresh: () -> Void
-    let onConnect: () -> Void
-    @State private var expanded = false
 
     var body: some View {
         VStack(spacing: 0) {
             Button {
-                withAnimation(.easeInOut(duration: 0.16)) { expanded.toggle() }
+                withAnimation(.easeInOut(duration: 0.16)) { onToggle() }
             } label: {
                 HStack(spacing: 12) {
                     ZStack {
@@ -24,7 +23,7 @@ struct ProviderRow: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
-                            Text(snapshot.providerName).fontWeight(.semibold)
+                            Text(snapshot.displayName).fontWeight(.semibold)
                             Circle().fill(snapshot.statusColor).frame(width: 6, height: 6)
                         }
                         Text(snapshot.plan ?? snapshot.status.capitalized)
@@ -78,23 +77,6 @@ struct ProviderRow: View {
                             .foregroundStyle(snapshot.status == "error" ? .red : .orange)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if let source = snapshot.sources?.first(where: { $0.actionLabel != nil }) {
-                        HStack(spacing: 8) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(source.label).fontWeight(.medium)
-                                if let message = source.message, !message.isEmpty {
-                                    Text(message)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                }
-                            }
-                            .font(.caption)
-                            Spacer()
-                            Button(source.actionLabel ?? "Connect") { onConnect() }
-                                .controlSize(.small)
-                                .disabled(authenticating)
-                        }
-                    }
                     HStack {
                         Text(sourceDescription)
                         Spacer()
@@ -103,7 +85,7 @@ struct ProviderRow: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(refreshing)
-                        .help("Refresh \(snapshot.providerName)")
+                        .help("Refresh \(snapshot.displayName)")
                         if let date = ISO8601DateFormatter().date(from: snapshot.collectedAt) {
                             Text(date.formatted(date: .omitted, time: .shortened))
                         }

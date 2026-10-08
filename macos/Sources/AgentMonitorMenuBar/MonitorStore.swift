@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ServiceManagement
 
 @MainActor
 final class MonitorStore: ObservableObject {
@@ -8,7 +9,9 @@ final class MonitorStore: ObservableObject {
     @Published private(set) var paused = false
     @Published private(set) var connected = false
     @Published private(set) var errorMessage: String?
-    @Published private(set) var authentication: AuthenticationMessage?
+    @Published private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @Published private(set) var launchAtLoginMessage: String?
+    @Published private(set) var expanded: Set<String> = []
 
     private var process: Process?
     private var input: Pipe?
@@ -40,30 +43,34 @@ final class MonitorStore: ObservableObject {
         send(action: "refresh")
     }
 
-    func refresh(providerId: String) {
-        send(["action": "refresh", "providerId": providerId])
-    }
-
-    func connect(providerId: String) {
-        authentication = nil
-        send([
-            "action": "authenticateDashboard",
-            "providerId": providerId,
-            "mode": "isolated",
-        ])
-    }
-
-    func cancelAuthentication() {
-        send(action: "cancelAuthentication")
-    }
-
-    func dismissAuthentication() {
-        guard authentication?.isWorking != true else { return }
-        authentication = nil
+    func refresh(key: String) {
+        send(["action": "refresh", "key": key])
     }
 
     func togglePause() {
         send(action: "togglePause")
+    }
+
+    func toggleExpanded(key: String) {
+        if expanded.contains(key) {
+            expanded.remove(key)
+        } else {
+            expanded.insert(key)
+        }
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            launchAtLoginMessage = nil
+        } catch {
+            launchAtLoginMessage = error.localizedDescription
+        }
+        launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
     func quit() {
@@ -135,27 +142,21 @@ final class MonitorStore: ObservableObject {
             let line = outputBuffer[..<newline]
             outputBuffer.removeSubrange(...newline)
             guard !line.isEmpty,
-                  let type = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                  let messageType = type["type"] as? String else {
+                  let message = try? JSONDecoder().decode(MonitorStateMessage.self, from: Data(line)) else {
                 continue
             }
-            if messageType == "state",
-               let message = try? JSONDecoder().decode(MonitorStateMessage.self, from: Data(line)) {
-                apply(message)
-            } else if messageType == "authentication",
-                      let message = try? JSONDecoder().decode(AuthenticationMessage.self, from: Data(line)) {
-                authentication = message
-            }
+            apply(message)
         }
     }
 
     private func apply(_ message: MonitorStateMessage) {
         guard message.type == "state" else { return }
         let order = ["codex", "claude", "cursor", "opencode", "gemini"]
-        snapshots = message.snapshots.sorted {
-            (order.firstIndex(of: $0.providerId) ?? order.count) <
-                (order.firstIndex(of: $1.providerId) ?? order.count)
-        }
+        snapshots = message.snapshots.enumerated().sorted { lhs, rhs in
+            let left = order.firstIndex(of: lhs.element.providerId) ?? order.count
+            let right = order.firstIndex(of: rhs.element.providerId) ?? order.count
+            return left == right ? lhs.offset < rhs.offset : left < right
+        }.map(\.element)
         refreshing = Set(message.refreshing)
         paused = message.paused
         connected = true
@@ -180,7 +181,6 @@ final class MonitorStore: ObservableObject {
         process = nil
         input = nil
         connected = false
-        authentication = nil
         if !stopping {
             let backendMessage = backendStderr.trimmingCharacters(in: .whitespacesAndNewlines)
             if !backendMessage.isEmpty {

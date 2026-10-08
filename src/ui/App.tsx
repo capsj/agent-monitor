@@ -1,21 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import type { MonitorConfig } from "../config.js";
 import type { MonitorEngine } from "../core/engine.js";
 import type { HistoryStore } from "../core/history.js";
 import { computeTrend } from "../core/trends.js";
 import {
-  dashboardAuthInstruction,
-  dashboardProviderLabel,
-  dashboardProviders,
-  type DashboardAuthMode,
-  type DashboardProvider,
-} from "../dashboard-auth.js";
-import {
-  providerIds,
+  displayName,
+  snapshotKey,
   type Metric,
   type MonitorState,
-  type ProviderId,
   type ProviderSnapshot,
   type UsageWindow,
 } from "../types.js";
@@ -36,18 +29,6 @@ interface AppProps {
   engine: MonitorEngine;
   config: MonitorConfig;
   history?: HistoryStore;
-  authenticateProvider?: (
-    provider: DashboardProvider,
-    mode?: DashboardAuthMode,
-    signal?: AbortSignal,
-  ) => Promise<string>;
-}
-
-interface AuthState {
-  provider?: DashboardProvider;
-  mode?: DashboardAuthMode;
-  status: "working" | "success" | "error" | "unsupported";
-  message: string;
 }
 
 const emptyState: MonitorState = {
@@ -103,7 +84,7 @@ function useTrend(
   return useMemo(() => {
     if (!snapshot || !history) return {};
     const since = new Date(Date.now() - 7 * 86_400_000);
-    const recent = history.recent(snapshot.providerId, since);
+    const recent = history.recent(snapshotKey(snapshot), since);
     if (recent.at(-1)?.collectedAt !== snapshot.collectedAt) recent.push(snapshot);
     return computeTrend(recent);
   }, [snapshot, history]);
@@ -196,7 +177,7 @@ function ProviderSection({
   now: number;
 }) {
   const trend = useTrend(snapshot, history);
-  const name = snapshot?.providerName ?? "Loading";
+  const name = snapshot ? displayName(snapshot) : "Loading";
   const status = snapshot?.status ?? "loading";
   const plan = snapshot?.plan ?? "—";
   const compact = width < 100;
@@ -343,7 +324,7 @@ function DetailPanel({
   return (
     <Box borderStyle="round" flexDirection="column" paddingX={1} width={width}>
       <Text bold>
-        {snapshot.providerName} <Text color="gray">via {snapshot.source}</Text>
+        {displayName(snapshot)} <Text color="gray">via {snapshot.source}</Text>
       </Text>
       <Text>
         {snapshot.windows.some((window) => window.usedPercent !== undefined)
@@ -416,57 +397,24 @@ function HelpPanel({ width }: { width: number }) {
     <Box borderStyle="round" flexDirection="column" paddingX={1} width={width}>
       <Text bold>Keyboard</Text>
       <Text>↑/↓ or j/k select provider · Enter toggle details · r refresh</Text>
-      <Text>a isolated auth · A personal Chrome · Space pause/resume · h close help · q quit</Text>
+      <Text>Space pause/resume · h close help · q quit</Text>
       <Text color="gray">No credentials, prompts, transcripts, or raw terminal screens are persisted.</Text>
     </Box>
   );
 }
 
-function AuthPanel({ state, width }: { state: AuthState; width: number }) {
-  const color =
-    state.status === "success"
-      ? "green"
-      : state.status === "error" || state.status === "unsupported"
-        ? "yellow"
-        : "cyan";
-  return (
-    <Box borderStyle="round" flexDirection="column" paddingX={1} width={width}>
-      <Text bold color={color}>
-        {state.status === "working"
-          ? `Authenticating ${state.provider ? dashboardProviderLabel(state.provider) : "provider"}${
-              state.mode === "personal" ? " in personal Chrome" : ""
-            }…`
-          : state.status === "success"
-            ? "Dashboard connected"
-            : "Dashboard authentication"}
-      </Text>
-      <Text>{state.message}</Text>
-      <Text color="gray">
-        {state.status === "working"
-          ? state.mode === "personal"
-            ? "Keep the usage tab open; the monitor resumes when it can read it. Press q or Esc to cancel."
-            : "The monitor resumes after Chrome closes. Press q or Esc to cancel."
-          : "Press Enter to return to provider details."}
-      </Text>
-    </Box>
-  );
-}
-
-export function App({ engine, config, history, authenticateProvider }: AppProps) {
+export function App({ engine, config, history }: AppProps) {
   const { exit } = useApp();
   const { columns: terminalColumns } = useWindowSize();
   const [state, setState] = useState<MonitorState>(emptyState);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showDetails, setShowDetails] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
-  const [authState, setAuthState] = useState<AuthState>();
-  const authController = useRef<AbortController | undefined>(undefined);
   const [now, setNow] = useState(Date.now());
-  const enabledIds = providerIds.filter((id) => config.enabledProviders.includes(id));
+  const enabledIds = useMemo(() => engine.keys(), [engine]);
   const layoutWidth = Math.min(Math.max(terminalColumns, 60), 180);
 
   useEffect(() => engine.subscribe(setState), [engine]);
-  useEffect(() => () => authController.current?.abort(), []);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 15_000);
     timer.unref();
@@ -474,87 +422,24 @@ export function App({ engine, config, history, authenticateProvider }: AppProps)
   }, []);
 
   useInput((input, key) => {
-    if (authState?.status === "working") {
-      if (input === "q" || key.escape) {
-        authController.current?.abort();
-        setAuthState({
-          provider: authState.provider,
-          mode: authState.mode,
-          status: "error",
-          message: "Dashboard authentication cancelled",
-        });
-      }
-      return;
-    }
     if (input === "q") {
       exit();
-    } else if (authState && key.return) {
-      setAuthState(undefined);
     } else if (input === "h") {
-      setAuthState(undefined);
       setShowHelp((value) => !value);
     } else if (input === "r") {
       void engine.refreshAll();
-    } else if (input === "a" || input === "A") {
-      if (!selectedId || !dashboardProviders.includes(selectedId as DashboardProvider)) {
-        setAuthState({
-          status: "unsupported",
-          message: "Dashboard authentication is available for Claude Code, Cursor, and OpenCode.",
-        });
-      } else if (!authenticateProvider) {
-        setAuthState({
-          status: "error",
-          message: "Interactive dashboard authentication is unavailable in this session.",
-        });
-      } else {
-        const provider = selectedId as DashboardProvider;
-        const mode: DashboardAuthMode = input === "A" ? "personal" : "isolated";
-        const controller = new AbortController();
-        authController.current = controller;
-        setShowHelp(false);
-        setAuthState({
-          provider,
-          mode,
-          status: "working",
-          message: dashboardAuthInstruction(provider, mode),
-        });
-        void authenticateProvider(provider, mode, controller.signal)
-          .then((url) => {
-            setAuthState({
-              provider,
-              mode,
-              status: "success",
-              message: `${dashboardProviderLabel(provider)} connected at ${new URL(url).hostname} using ${
-                mode === "personal" ? "personal Chrome" : "an isolated profile"
-              }. Usage is refreshing now.`,
-            });
-          })
-          .catch((error: unknown) => {
-            setAuthState({
-              provider,
-              mode,
-              status: "error",
-              message: error instanceof Error ? error.message : String(error),
-            });
-          })
-          .finally(() => {
-            if (authController.current === controller) authController.current = undefined;
-          });
-      }
     } else if (input === " ") {
       engine.togglePaused();
     } else if (key.return) {
       setShowDetails((value) => !value);
     } else if (key.upArrow || input === "k") {
-      setAuthState(undefined);
       setSelectedIndex((index) => (index - 1 + enabledIds.length) % enabledIds.length);
     } else if (key.downArrow || input === "j") {
-      setAuthState(undefined);
       setSelectedIndex((index) => (index + 1) % enabledIds.length);
     }
   });
 
-  const selectedId = enabledIds[selectedIndex] as ProviderId | undefined;
+  const selectedId = enabledIds[selectedIndex];
   const selectedSnapshot = selectedId ? state.snapshots.get(selectedId) : undefined;
   const okCount = [...state.snapshots.values()].filter((item) => item.status === "ok").length;
   const partialCount = [...state.snapshots.values()].filter(
@@ -592,9 +477,7 @@ export function App({ engine, config, history, authenticateProvider }: AppProps)
         />
       ))}
       <Box marginTop={1}>
-        {authState ? (
-          <AuthPanel state={authState} width={layoutWidth} />
-        ) : showHelp ? (
+        {showHelp ? (
           <HelpPanel width={layoutWidth} />
         ) : showDetails ? (
           <DetailPanel
@@ -605,7 +488,7 @@ export function App({ engine, config, history, authenticateProvider }: AppProps)
           />
         ) : (
           <Text color="gray">
-            Enter for details · a/A auth · r refresh · Space pause · h help · q quit ·{" "}
+            Enter for details · r refresh · Space pause · h help · q quit ·{" "}
             {compactNumber(state.refreshing.size)} refreshing
           </Text>
         )}

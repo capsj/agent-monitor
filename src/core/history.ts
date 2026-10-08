@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
-import { providerSnapshotSchema, type ProviderId, type ProviderSnapshot } from "../types.js";
+import { providerSnapshotSchema, snapshotKey, type ProviderSnapshot } from "../types.js";
 
 interface SnapshotRow {
   collected_at: string;
@@ -46,7 +46,7 @@ export class HistoryStore {
         `SELECT collected_at, fingerprint
          FROM snapshots WHERE provider_id = ? ORDER BY collected_at DESC LIMIT 1`,
       )
-      .get(snapshot.providerId) as { collected_at: string; fingerprint: string } | undefined;
+      .get(snapshotKey(snapshot)) as { collected_at: string; fingerprint: string } | undefined;
 
     const heartbeatDue =
       !previous ||
@@ -61,7 +61,7 @@ export class HistoryStore {
          VALUES (?, ?, ?, ?)`,
       )
       .run(
-        snapshot.providerId,
+        snapshotKey(snapshot),
         snapshot.collectedAt,
         fingerprint,
         JSON.stringify(sanitized),
@@ -69,7 +69,7 @@ export class HistoryStore {
     return true;
   }
 
-  recent(providerId: ProviderId, since: Date): ProviderSnapshot[] {
+  recent(key: string, since: Date): ProviderSnapshot[] {
     const rows = this.db
       .prepare(
         `SELECT collected_at, payload_json
@@ -77,7 +77,7 @@ export class HistoryStore {
          WHERE provider_id = ? AND collected_at >= ?
          ORDER BY collected_at ASC`,
       )
-      .all(providerId, since.toISOString()) as SnapshotRow[];
+      .all(key, since.toISOString()) as SnapshotRow[];
 
     return rows.flatMap((row) => {
       try {
@@ -88,13 +88,13 @@ export class HistoryStore {
     });
   }
 
-  latest(providerId: ProviderId): ProviderSnapshot | undefined {
+  latest(key: string): ProviderSnapshot | undefined {
     const row = this.db
       .prepare(
         `SELECT collected_at, payload_json
          FROM snapshots WHERE provider_id = ? ORDER BY collected_at DESC LIMIT 1`,
       )
-      .get(providerId) as SnapshotRow | undefined;
+      .get(key) as SnapshotRow | undefined;
     if (!row) return undefined;
     try {
       return providerSnapshotSchema.parse(JSON.parse(row.payload_json));
@@ -115,6 +115,7 @@ export class HistoryStore {
   private fingerprint(snapshot: ProviderSnapshot): string {
     const stable = {
       providerId: snapshot.providerId,
+      accountId: snapshot.accountId ?? null,
       status: snapshot.status,
       plan: snapshot.plan ?? null,
       summary: snapshot.summary,

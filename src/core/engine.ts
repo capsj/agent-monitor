@@ -1,23 +1,38 @@
 import type { MonitorConfig } from "../config.js";
 import {
   errorSnapshot,
+  snapshotKey,
   type MonitorState,
   type ProviderAdapter,
-  type ProviderId,
   type ProviderSnapshot,
 } from "../types.js";
 import type { HistoryStore } from "./history.js";
 
 type Listener = (state: MonitorState) => void;
 
+export function adapterKey(adapter: Pick<ProviderAdapter, "id" | "accountId">): string {
+  return snapshotKey({ providerId: adapter.id, accountId: adapter.accountId });
+}
+
+function fallbackSource(adapter: ProviderAdapter): ProviderSnapshot["source"] {
+  switch (adapter.id) {
+    case "codex":
+      return "structured";
+    case "claude":
+    case "cursor":
+      return "api";
+    case "opencode":
+    case "gemini":
+      return "local";
+  }
+}
+
 export class MonitorEngine {
-  private readonly snapshots = new Map<ProviderId, ProviderSnapshot>();
-  private readonly refreshing = new Set<ProviderId>();
+  private readonly snapshots = new Map<string, ProviderSnapshot>();
+  private readonly refreshing = new Set<string>();
   private readonly listeners = new Set<Listener>();
-  private readonly timers = new Map<ProviderId, NodeJS.Timeout>();
-  private readonly failures = new Map<ProviderId, number>();
-  private readonly suspended = new Set<ProviderId>();
-  private readonly idleWaiters = new Map<ProviderId, Set<() => void>>();
+  private readonly timers = new Map<string, NodeJS.Timeout>();
+  private readonly failures = new Map<string, number>();
   private stopped = true;
   private paused = false;
 
@@ -26,6 +41,11 @@ export class MonitorEngine {
     private readonly config: MonitorConfig,
     private readonly history?: HistoryStore,
   ) {}
+
+  /** Snapshot keys in display order. */
+  keys(): string[] {
+    return this.adapters.map(adapterKey);
+  }
 
   getState(): MonitorState {
     return {
@@ -43,7 +63,7 @@ export class MonitorEngine {
 
   async start(): Promise<void> {
     this.stopped = false;
-    await Promise.allSettled(this.adapters.map((adapter) => this.collect(adapter.id)));
+    await Promise.allSettled(this.adapters.map((adapter) => this.collect(adapterKey(adapter))));
   }
 
   async stop(): Promise<void> {
@@ -51,27 +71,6 @@ export class MonitorEngine {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     await Promise.allSettled(this.adapters.map((adapter) => adapter.stop?.()));
-  }
-
-  async suspendProvider(id: ProviderId): Promise<void> {
-    this.suspended.add(id);
-    const timer = this.timers.get(id);
-    if (timer) clearTimeout(timer);
-    this.timers.delete(id);
-    if (this.refreshing.has(id)) {
-      await new Promise<void>((resolve) => {
-        const waiters = this.idleWaiters.get(id) ?? new Set<() => void>();
-        waiters.add(resolve);
-        this.idleWaiters.set(id, waiters);
-      });
-    }
-    const adapter = this.adapters.find((item) => item.id === id);
-    await adapter?.stop?.();
-  }
-
-  resumeProvider(id: ProviderId): void {
-    this.suspended.delete(id);
-    void this.collect(id, true);
   }
 
   setPaused(paused: boolean): void {
@@ -87,17 +86,19 @@ export class MonitorEngine {
   }
 
   async refreshAll(): Promise<void> {
-    await Promise.allSettled(this.adapters.map((adapter) => this.collect(adapter.id, true)));
+    await Promise.allSettled(
+      this.adapters.map((adapter) => this.collect(adapterKey(adapter), true)),
+    );
   }
 
-  async collect(id: ProviderId, manual = false): Promise<void> {
-    if (this.stopped || this.paused || this.suspended.has(id) || this.refreshing.has(id)) return;
-    const adapter = this.adapters.find((item) => item.id === id);
+  async collect(key: string, manual = false): Promise<void> {
+    if (this.stopped || this.paused || this.refreshing.has(key)) return;
+    const adapter = this.adapters.find((item) => adapterKey(item) === key);
     if (!adapter) return;
-    const oldTimer = this.timers.get(id);
+    const oldTimer = this.timers.get(key);
     if (oldTimer) clearTimeout(oldTimer);
 
-    this.refreshing.add(id);
+    this.refreshing.add(key);
     this.emit();
     let failed = false;
     try {
@@ -107,38 +108,28 @@ export class MonitorEngine {
       });
       failed = collected.status === "error";
       const snapshot = failed
-        ? this.staleOrError(id, collected)
-        : this.preservePreviousOnPartial(id, collected);
+        ? this.staleOrError(key, collected)
+        : this.preservePreviousOnPartial(key, collected);
       failed ||= snapshot.status === "stale";
-      this.snapshots.set(id, snapshot);
+      this.snapshots.set(key, snapshot);
       if (snapshot.status !== "stale") this.history?.record(snapshot);
     } catch (error) {
       failed = true;
-      const failure = errorSnapshot(
-        id,
-        adapter.name,
-        id === "codex" ? "structured" : id === "opencode" || id === "gemini" ? "local" : "cli",
-        error,
-      );
-      const snapshot = this.staleOrError(id, failure);
-      this.snapshots.set(id, snapshot);
+      const failure = errorSnapshot(adapter, fallbackSource(adapter), error);
+      const snapshot = this.staleOrError(key, failure);
+      this.snapshots.set(key, snapshot);
       if (snapshot.status !== "stale") this.history?.record(snapshot);
     } finally {
-      this.refreshing.delete(id);
-      const waiters = this.idleWaiters.get(id);
-      if (waiters) {
-        this.idleWaiters.delete(id);
-        for (const resolve of waiters) resolve();
-      }
-      const failureCount = failed ? (this.failures.get(id) ?? 0) + 1 : 0;
-      this.failures.set(id, failureCount);
+      this.refreshing.delete(key);
+      const failureCount = failed ? (this.failures.get(key) ?? 0) + 1 : 0;
+      this.failures.set(key, failureCount);
       this.emit();
-      if (!this.stopped && !this.suspended.has(id)) {
+      if (!this.stopped) {
         const base = adapter.defaultRefreshMs;
         const delay = manual || !failed ? base : Math.min(base * 2 ** failureCount, 300_000);
-        const timer = setTimeout(() => void this.collect(id), delay);
+        const timer = setTimeout(() => void this.collect(key), delay);
         timer.unref();
-        this.timers.set(id, timer);
+        this.timers.set(key, timer);
       }
     }
   }
@@ -148,11 +139,8 @@ export class MonitorEngine {
     for (const listener of this.listeners) listener(state);
   }
 
-  private staleOrError(
-    id: ProviderId,
-    failure: ProviderSnapshot,
-  ): ProviderSnapshot {
-    const previous = this.snapshots.get(id);
+  private staleOrError(key: string, failure: ProviderSnapshot): ProviderSnapshot {
+    const previous = this.snapshots.get(key);
     if (!previous || previous.status === "error") return failure;
     return {
       ...previous,
@@ -162,11 +150,11 @@ export class MonitorEngine {
   }
 
   private preservePreviousOnPartial(
-    id: ProviderId,
+    key: string,
     collected: ProviderSnapshot,
   ): ProviderSnapshot {
     if (collected.status !== "partial") return collected;
-    const previous = this.snapshots.get(id);
+    const previous = this.snapshots.get(key);
     if (
       !previous ||
       previous.status === "error" ||

@@ -43,31 +43,18 @@ describe("monitor state stream", () => {
     });
   });
 
-  it("accepts provider refresh and managed dashboard authentication commands", () => {
-    expect(parseStreamCommand('{"action":"refresh","providerId":"cursor"}')).toEqual({
+  it("accepts refresh commands for one snapshot key or every provider", () => {
+    expect(parseStreamCommand('{"action":"refresh","key":"claude:work"}')).toEqual({
       action: "refresh",
-      providerId: "cursor",
+      key: "claude:work",
     });
-    expect(
-      parseStreamCommand(
-        '{"action":"authenticateDashboard","providerId":"cursor","mode":"isolated"}',
-      ),
-    ).toEqual({
-      action: "authenticateDashboard",
-      providerId: "cursor",
-      mode: "isolated",
-    });
-    expect(parseStreamCommand('{"action":"cancelAuthentication"}')).toEqual({
-      action: "cancelAuthentication",
-    });
+    expect(parseStreamCommand('{"action":"refresh"}')).toEqual({ action: "refresh" });
+    expect(parseStreamCommand('{"action":"togglePause"}')).toEqual({ action: "togglePause" });
   });
 
-  it("ignores unsupported authentication providers", () => {
-    expect(
-      parseStreamCommand(
-        '{"action":"authenticateDashboard","providerId":"gemini","mode":"isolated"}',
-      ),
-    ).toBeUndefined();
-    expect(parseStreamCommand('{"action":"refresh","providerId":"unknown"}')).toBeUndefined();
+  it("ignores malformed or unknown commands", () => {
+    expect(parseStreamCommand('{"action":"refresh","key":42}')).toBeUndefined();
+    expect(parseStreamCommand('{"action":"authenticateDashboard"}')).toBeUndefined();
+    expect(parseStreamCommand("not json")).toBeUndefined();
   });
 });

@@ -7,19 +7,27 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { z } from "zod";
 import type {
-  CollectionContext,
+  Metric,
   ProviderAdapter,
   ProviderSnapshot,
   ProviderSourceStatus,
   UsageWindow,
 } from "../types.js";
-import { claudeWorkspacePath } from "../config.js";
-import { DashboardSession, dashboardAuthStatus } from "../dashboard-auth.js";
+import { nowIso } from "../types.js";
+import { claudeWorkspacePath, defaultClaudeConfigDir } from "../config.js";
 import { formatWindowUsage } from "../utils/format.js";
 import { cleanTerminalOutput, detectVersion } from "../utils/process.js";
-import { parseClaudeDashboard } from "./dashboard-parsers.js";
+import {
+  claudeCredentialExpired,
+  readClaudeCredential,
+  type ClaudeCredential,
+} from "./claude-credentials.js";
 import { PtySession } from "./pty-session.js";
+
+export const claudeUsageUrl = "https://api.anthropic.com/api/oauth/usage";
+export const claudeProfileUrl = "https://api.anthropic.com/api/oauth/profile";
 
 const workspaceMarker = ".agent-monitor-workspace";
 const workspaceMarkerContents = "Private workspace for agent-monitor's read-only Claude usage session.\n";
@@ -40,13 +48,6 @@ export function claudeWorkspaceTrustTarget(raw: string): string | undefined {
     )?.[1]
     ?.replace(/\s*\n\s*/g, " ")
     .trim();
-}
-
-function claudePlan(raw: string): string | null {
-  return (
-    cleanTerminalOutput(raw)
-      .match(/\bClaude\s+(Pro|Max 5x|Max 20x|Team|Enterprise)\b/i)?.[1] ?? null
-  );
 }
 
 function ensureClaudeWorkspace(path: string): void {
@@ -78,412 +79,320 @@ function ensureClaudeWorkspace(path: string): void {
   }
 }
 
-function parseReset(line: string): string | undefined {
-  return line.match(/reset(?:s|ting)?(?:\s+in|\s+at|:)?\s+(.+)$/i)?.[1]?.trim();
+const usageWindowSchema = z
+  .object({
+    utilization: z.number().nullable(),
+    resets_at: z.string().nullable(),
+  })
+  .nullable()
+  .optional();
+
+const usageLimitSchema = z.object({
+  kind: z.string(),
+  percent: z.number().nullable(),
+  resets_at: z.string().nullable().optional(),
+  scope: z
+    .object({
+      model: z
+        .object({ display_name: z.string().nullable().optional() })
+        .nullable()
+        .optional(),
+      surface: z.string().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
+});
+
+const usageResponseSchema = z.object({
+  five_hour: usageWindowSchema,
+  seven_day: usageWindowSchema,
+  seven_day_opus: usageWindowSchema,
+  seven_day_sonnet: usageWindowSchema,
+  limits: z.array(usageLimitSchema).nullable().optional(),
+  extra_usage: z
+    .object({
+      is_enabled: z.boolean().nullable().optional(),
+      monthly_limit: z.number().nullable().optional(),
+      used_credits: z.number().nullable().optional(),
+      decimal_places: z.number().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
+});
+
+const profileResponseSchema = z.object({
+  organization: z
+    .object({
+      organization_type: z.string().nullable().optional(),
+      rate_limit_tier: z.string().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
+});
+
+export interface ClaudeUsage {
+  windows: UsageWindow[];
+  metrics: Metric[];
 }
 
-interface DateParts {
-  year: number;
-  month: number;
-  day: number;
-  hour: number;
-  minute: number;
+function isoOrUndefined(value: string | null | undefined): string | undefined {
+  if (!value) return undefined;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
 }
 
-const months = [
-  "jan",
-  "feb",
-  "mar",
-  "apr",
-  "may",
-  "jun",
-  "jul",
-  "aug",
-  "sep",
-  "oct",
-  "nov",
-  "dec",
-];
-const weekdays = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-
-function clockHour(hour: number, meridiem?: string): number {
-  if (!meridiem) return hour;
-  const normalized = hour % 12;
-  return meridiem.toLowerCase() === "pm" ? normalized + 12 : normalized;
+function slug(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
-function partsInZone(date: Date, timeZone?: string): DateParts {
-  if (!timeZone) {
-    return {
-      year: date.getFullYear(),
-      month: date.getMonth() + 1,
-      day: date.getDate(),
-      hour: date.getHours(),
-      minute: date.getMinutes(),
-    };
-  }
-  try {
-    const values = Object.fromEntries(
-      new Intl.DateTimeFormat("en-US", {
-        timeZone,
-        year: "numeric",
-        month: "numeric",
-        day: "numeric",
-        hour: "numeric",
-        minute: "numeric",
-        hourCycle: "h23",
-      })
-        .formatToParts(date)
-        .filter((part) => part.type !== "literal")
-        .map((part) => [part.type, Number(part.value)]),
-    );
-    return {
-      year: Number(values.year),
-      month: Number(values.month),
-      day: Number(values.day),
-      hour: Number(values.hour),
-      minute: Number(values.minute),
-    };
-  } catch {
-    return partsInZone(date);
-  }
-}
-
-function dateInZone(parts: DateParts, timeZone?: string): Date {
-  if (!timeZone) {
-    return new Date(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
-  }
-  try {
-    const desired = Date.UTC(
-      parts.year,
-      parts.month - 1,
-      parts.day,
-      parts.hour,
-      parts.minute,
-    );
-    let candidate = desired;
-    for (let iteration = 0; iteration < 2; iteration += 1) {
-      const rendered = partsInZone(new Date(candidate), timeZone);
-      const renderedAsUtc = Date.UTC(
-        rendered.year,
-        rendered.month - 1,
-        rendered.day,
-        rendered.hour,
-        rendered.minute,
-      );
-      candidate += desired - renderedAsUtc;
+function limitIdentity(
+  limit: z.infer<typeof usageLimitSchema>,
+): { id: string; label: string } | undefined {
+  switch (limit.kind) {
+    case "session":
+      return { id: "session", label: "Session" };
+    case "weekly_all":
+      return { id: "weekly", label: "Weekly" };
+    case "weekly_scoped": {
+      const name = limit.scope?.model?.display_name ?? limit.scope?.surface;
+      return name ? { id: `weekly_${slug(name)}`, label: `Weekly ${name}` } : undefined;
     }
-    return new Date(candidate);
-  } catch {
-    return dateInZone(parts);
+    default:
+      return undefined;
   }
 }
 
-function addCalendarDays(parts: DateParts, days: number): DateParts {
-  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days));
-  return {
-    year: date.getUTCFullYear(),
-    month: date.getUTCMonth() + 1,
-    day: date.getUTCDate(),
-    hour: parts.hour,
-    minute: parts.minute,
-  };
-}
-
-export function parseClaudeResetAt(
-  description: string,
-  now = new Date(),
-): string | undefined {
-  const zone = description.match(/\(([^)]+\/[^)]+)\)\s*$/)?.[1];
-  const value = description.replace(/\s*\([^)]+\)\s*$/, "").trim();
-  const duration = value.match(
-    /^(?:(\d+(?:\.\d+)?)\s*d(?:ays?)?)?\s*(?:(\d+(?:\.\d+)?)\s*h(?:ours?)?)?\s*(?:(\d+(?:\.\d+)?)\s*m(?:in(?:utes?)?)?)?$/i,
-  );
-  if (duration && duration.slice(1).some(Boolean)) {
-    const seconds =
-      Number(duration[1] ?? 0) * 86_400 +
-      Number(duration[2] ?? 0) * 3_600 +
-      Number(duration[3] ?? 0) * 60;
-    return new Date(now.getTime() + seconds * 1000).toISOString();
+/**
+ * Normalize Claude's OAuth usage payload. Unknown limit kinds are ignored so
+ * the monitor never invents a gauge for a value it does not understand.
+ */
+export function parseClaudeUsageResponse(input: unknown): ClaudeUsage | undefined {
+  const parsed = usageResponseSchema.safeParse(input);
+  if (!parsed.success) return undefined;
+  const data = parsed.data;
+  if (data.limits === undefined && data.five_hour === undefined && data.seven_day === undefined) {
+    return undefined;
   }
-
-  const current = partsInZone(now, zone);
-  const time = value.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
-  if (time) {
-    let targetParts: DateParts = {
-      ...current,
-      hour: clockHour(Number(time[1]), time[3]),
-      minute: Number(time[2] ?? 0),
-    };
-    let target = dateInZone(targetParts, zone);
-    if (target.getTime() <= now.getTime()) {
-      targetParts = addCalendarDays(targetParts, 1);
-      target = dateInZone(targetParts, zone);
-    }
-    return target.toISOString();
-  }
-
-  const calendarDate = value.match(
-    /^([A-Za-z]{3,9})\s+(\d{1,2})(?:,\s*(\d{4}))?\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i,
-  );
-  if (calendarDate) {
-    const month = months.findIndex((item) =>
-      calendarDate[1]?.toLowerCase().startsWith(item),
-    );
-    if (month >= 0) {
-      const explicitYear = calendarDate[3] ? Number(calendarDate[3]) : undefined;
-      const targetParts: DateParts = {
-        year: explicitYear ?? current.year,
-        month: month + 1,
-        day: Number(calendarDate[2]),
-        hour: clockHour(Number(calendarDate[4]), calendarDate[6]),
-        minute: Number(calendarDate[5] ?? 0),
-      };
-      let target = dateInZone(targetParts, zone);
-      if (!explicitYear && target.getTime() <= now.getTime()) {
-        target = dateInZone({ ...targetParts, year: targetParts.year + 1 }, zone);
-      }
-      return target.toISOString();
-    }
-  }
-
-  const weekday = value.match(
-    /^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i,
-  );
-  if (weekday) {
-    const targetWeekday = weekdays.indexOf(weekday[1]?.toLowerCase() ?? "");
-    const currentCalendar = new Date(Date.UTC(current.year, current.month - 1, current.day));
-    const daysAhead = (targetWeekday - currentCalendar.getUTCDay() + 7) % 7;
-    let targetParts = addCalendarDays(
-      {
-        ...current,
-        hour: clockHour(Number(weekday[2]), weekday[4]),
-        minute: Number(weekday[3] ?? 0),
-      },
-      daysAhead,
-    );
-    let target = dateInZone(targetParts, zone);
-    if (target.getTime() <= now.getTime()) {
-      targetParts = addCalendarDays(targetParts, 7);
-      target = dateInZone(targetParts, zone);
-    }
-    return target.toISOString();
-  }
-
-  return undefined;
-}
-
-export function parseClaudeUsage(
-  raw: string,
-  version?: string,
-  now = new Date(),
-): ProviderSnapshot {
-  const lines = raw
-    .split("\n")
-    .map((line) => line.replace(/[│┃╭╮╰╯─━┌┐└┘]/g, " ").replace(/\s+/g, " ").trim())
-    .filter(Boolean);
   const windows = new Map<string, UsageWindow>();
-  let pendingWindow: { id: string; label: string } | undefined;
-  let lastWindowId: string | undefined;
-  for (const line of lines) {
-    if (/^current session$/i.test(line)) {
-      pendingWindow = { id: "session", label: "Session" };
-      continue;
+  const addWindow = (
+    id: string,
+    label: string,
+    usedPercent: number | null | undefined,
+    resetsAt: string | null | undefined,
+  ): void => {
+    if (usedPercent === null || usedPercent === undefined || !Number.isFinite(usedPercent)) {
+      return;
     }
-    if (/^current week(?:\s+\(all models\))?$/i.test(line)) {
-      pendingWindow = { id: "weekly", label: "Weekly" };
-      continue;
-    }
-    if (/^current week.*sonnet/i.test(line)) {
-      pendingWindow = { id: "sonnet", label: "Weekly Sonnet" };
-      continue;
-    }
-    if (/^resets?\s+/i.test(line) && lastWindowId) {
-      const existing = windows.get(lastWindowId);
-      const resetDescription = parseReset(line);
-      if (existing && resetDescription) {
-        const resetsAt = parseClaudeResetAt(resetDescription, now);
-        windows.set(lastWindowId, {
-          ...existing,
-          resetDescription,
-          ...(resetsAt ? { resetsAt } : {}),
-        });
-      }
-      pendingWindow = undefined;
-      continue;
-    }
-    const percent = line.match(/(\d{1,3}(?:\.\d+)?)\s*%\s*used\b/i);
-    if (!percent) continue;
-    const usedPercent = Number(percent[1]);
-    if (!Number.isFinite(usedPercent)) continue;
-    let id = pendingWindow?.id;
-    let label = pendingWindow?.label;
-    if (/session|5[\s-]*hour/i.test(line)) {
-      id = "session";
-      label = "Session";
-    } else if (/week|weekly|all models/i.test(line)) {
-      id = "weekly";
-      label = /sonnet/i.test(line) ? "Weekly Sonnet" : "Weekly";
-    } else if (/sonnet/i.test(line)) {
-      id = "sonnet";
-      label = "Sonnet";
-    }
-    if (!id || !label) continue;
-    const resetDescription = parseReset(line);
-    const resetsAt = resetDescription ? parseClaudeResetAt(resetDescription, now) : undefined;
-    const existing = windows.get(id);
+    const reset = isoOrUndefined(resetsAt);
     windows.set(id, {
-      ...existing,
       id,
       label,
-      usedPercent,
-      ...(resetDescription
-        ? { resetDescription }
-        : existing?.resetDescription
-          ? { resetDescription: existing.resetDescription }
-          : {}),
-      ...(resetsAt
-        ? { resetsAt }
-        : existing?.resetsAt
-          ? { resetsAt: existing.resetsAt }
-          : {}),
+      usedPercent: Math.max(0, usedPercent),
+      ...(reset ? { resetsAt: reset } : {}),
       quality: "exact",
       category: "included",
     });
-    lastWindowId = id;
-    pendingWindow = undefined;
+  };
+
+  if (data.limits && data.limits.length > 0) {
+    for (const limit of data.limits) {
+      const identity = limitIdentity(limit);
+      if (identity) addWindow(identity.id, identity.label, limit.percent, limit.resets_at);
+    }
+  } else {
+    addWindow("session", "Session", data.five_hour?.utilization, data.five_hour?.resets_at);
+    addWindow("weekly", "Weekly", data.seven_day?.utilization, data.seven_day?.resets_at);
+    addWindow(
+      "weekly_opus",
+      "Weekly Opus",
+      data.seven_day_opus?.utilization,
+      data.seven_day_opus?.resets_at,
+    );
+    addWindow(
+      "weekly_sonnet",
+      "Weekly Sonnet",
+      data.seven_day_sonnet?.utilization,
+      data.seven_day_sonnet?.resets_at,
+    );
   }
 
-  const joined = lines.join(" ");
-  const creditStatus = joined.match(/usage credits are\s+(on|off)\b/i)?.[1]?.toLowerCase();
-  const extraSpent = joined.match(/([$€£]\s?[\d.,]+)\s+spent\b/i)?.[1];
-  const extraLimit = joined.match(
-    /([$€£]\s?[\d.,]+)\s+(?:monthly\s+)?(?:spend\s+)?limit\b/i,
-  )?.[1];
-  const creditBalance = joined.match(
-    /([$€£]\s?[\d.,]+)\s+(?:current\s+)?balance\b|(?:current\s+)?balance.{0,20}?([$€£]\s?[\d.,]+)/i,
-  );
-  const currencyValue = (value: string | undefined): number | undefined => {
-    if (!value) return undefined;
-    const parsed = Number(value.replace(/[$€£,\s]/g, ""));
-    return Number.isFinite(parsed) ? parsed : undefined;
-  };
-  const loginRequired = /log in|not authenticated|authentication required/i.test(joined);
-  const trustRequired = isClaudeWorkspaceTrustPrompt(raw);
-  const usageWindows = [...windows.values()];
-  const metrics: ProviderSnapshot["metrics"] = [];
-  const spent = currencyValue(extraSpent);
-  const limit = currencyValue(extraLimit);
-  const balance = currencyValue(creditBalance?.[1] ?? creditBalance?.[2]);
-  if (spent !== undefined) {
-    metrics.push({
-      key: "additional_spent",
-      label: "Credits spent",
-      value: spent,
-      unit: "currency",
-      quality: "exact",
-      category: "additional",
-    });
+  const metrics: Metric[] = [];
+  const extra = data.extra_usage;
+  if (extra) {
+    const scale = 10 ** (extra.decimal_places ?? 2);
+    if (typeof extra.used_credits === "number") {
+      metrics.push({
+        key: "additional_spent",
+        label: "Credits spent",
+        value: extra.used_credits / scale,
+        unit: "currency",
+        quality: "exact",
+        category: "additional",
+      });
+    }
+    if (typeof extra.monthly_limit === "number") {
+      metrics.push({
+        key: "additional_limit",
+        label: "Monthly limit",
+        value: extra.monthly_limit / scale,
+        unit: "currency",
+        quality: "exact",
+        category: "additional",
+      });
+    }
+    if (typeof extra.is_enabled === "boolean") {
+      metrics.push({
+        key: "usage_credits_status",
+        label: "Usage credits",
+        value: extra.is_enabled ? "on" : "off",
+        unit: "text",
+        quality: "exact",
+        category: "additional",
+      });
+    }
   }
-  if (limit !== undefined) {
-    metrics.push({
-      key: "additional_limit",
-      label: "Monthly limit",
-      value: limit,
-      unit: "currency",
-      quality: "exact",
-      category: "additional",
-    });
-  }
-  if (balance !== undefined) {
-    metrics.push({
-      key: "credit_balance",
-      label: "Credit balance",
-      value: balance,
-      unit: "currency",
-      quality: "exact",
-      category: "additional",
-    });
-  }
-  if (creditStatus) {
-    metrics.push({
-      key: "usage_credits_status",
-      label: "Usage credits",
-      value: creditStatus,
-      unit: "text",
-      quality: "exact",
-      category: "additional",
-    });
-  }
-  const available = usageWindows.length > 0 || metrics.length > 0;
-  const primary = usageWindows[0];
 
-  return {
-    providerId: "claude",
-    providerName: "Claude Code",
-    collectedAt: now.toISOString(),
-    status: available
-      ? "ok"
-      : loginRequired || trustRequired
-        ? "unavailable"
-        : "partial",
-    source: "cli",
-    plan: claudePlan(raw),
-    summary:
-      primary?.usedPercent !== undefined
-        ? `${formatWindowUsage(primary)} in ${primary.label.toLowerCase()}`
-        : loginRequired
-          ? "Not authenticated"
-          : trustRequired
-            ? "Workspace trust required"
-          : "Usage format not recognized",
-    windows: usageWindows,
-    metrics,
-    message: available
-      ? null
-      : loginRequired
-        ? "Run claude and sign in"
-        : trustRequired
-          ? "Claude is waiting for workspace trust"
-          : "Claude's /usage screen changed or did not expose subscription limits",
-    version: version ?? null,
-  };
+  return { windows: [...windows.values()], metrics };
 }
+
+export function claudePlanLabel(input: unknown): string | null {
+  const parsed = profileResponseSchema.safeParse(input);
+  if (!parsed.success) return null;
+  const type = parsed.data.organization?.organization_type ?? "";
+  const tier = parsed.data.organization?.rate_limit_tier ?? "";
+  switch (type) {
+    case "claude_max":
+      return /20x/.test(tier) ? "Max 20x" : /5x/.test(tier) ? "Max 5x" : "Max";
+    case "claude_pro":
+      return "Pro";
+    case "claude_team":
+      return "Team";
+    case "claude_enterprise":
+      return "Enterprise";
+    case "claude_free":
+      return "Free";
+    default:
+      return null;
+  }
+}
+
+export type ClaudeApiResult<T> =
+  | { status: "ok"; value: T }
+  | { status: "unauthorized" }
+  | { status: "error"; message: string };
+
+async function fetchClaudeJson(
+  url: string,
+  token: string,
+  timeoutMs: number,
+  fetcher: typeof fetch,
+): Promise<ClaudeApiResult<unknown>> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  timer.unref();
+  try {
+    const response = await fetcher(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "anthropic-beta": "oauth-2025-04-20",
+        "User-Agent": "agent-monitor/0.1.0",
+      },
+      signal: controller.signal,
+    });
+    if (response.status === 401 || response.status === 403) return { status: "unauthorized" };
+    if (!response.ok) {
+      return { status: "error", message: `Claude usage request failed (${response.status})` };
+    }
+    return { status: "ok", value: await response.json() };
+  } catch (error) {
+    return {
+      status: "error",
+      message:
+        error instanceof Error && error.name === "AbortError"
+          ? "Claude usage request timed out"
+          : "Claude usage request failed",
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function fetchClaudeUsage(
+  token: string,
+  timeoutMs = 15_000,
+  fetcher: typeof fetch = fetch,
+): Promise<ClaudeApiResult<ClaudeUsage>> {
+  const result = await fetchClaudeJson(claudeUsageUrl, token, timeoutMs, fetcher);
+  if (result.status !== "ok") return result;
+  const usage = parseClaudeUsageResponse(result.value);
+  return usage
+    ? { status: "ok", value: usage }
+    : { status: "error", message: "Claude returned an unrecognized usage format" };
+}
+
+export async function fetchClaudePlan(
+  token: string,
+  timeoutMs = 15_000,
+  fetcher: typeof fetch = fetch,
+): Promise<ClaudeApiResult<string | null>> {
+  const result = await fetchClaudeJson(claudeProfileUrl, token, timeoutMs, fetcher);
+  if (result.status !== "ok") return result;
+  return { status: "ok", value: claudePlanLabel(result.value) };
+}
+
+export interface ClaudeAccount {
+  id: string;
+  label?: string;
+  configDir?: string;
+}
+
+export interface ClaudeAdapterOptions {
+  executable?: string;
+  refreshMs?: number;
+  timeoutMs?: number;
+  account?: ClaudeAccount;
+  multiAccount?: boolean;
+  reuseProviderCredentials?: boolean;
+  workspace?: string;
+  fetcher?: typeof fetch;
+  credentialReader?: (configDir: string) => Promise<ClaudeCredential | undefined>;
+}
+
+const refreshCooldownMs = 10 * 60_000;
 
 export class ClaudeAdapter implements ProviderAdapter {
   readonly id = "claude" as const;
   readonly name = "Claude Code";
+  readonly accountId?: string;
+  readonly accountLabel?: string;
   readonly defaultRefreshMs: number;
-  private readonly session: PtySession;
-  private readonly dashboard: DashboardSession;
+  private readonly executable: string;
+  private readonly timeoutMs: number;
+  private readonly configDir: string;
+  private readonly reuseProviderCredentials: boolean;
   private readonly workspace: string;
+  private readonly fetcher: typeof fetch;
+  private readonly readCredential: (configDir: string) => Promise<ClaudeCredential | undefined>;
+  private session?: PtySession;
   private version?: string;
-  private plan?: string;
+  private plan?: string | null;
+  private lastRefreshAttempt = 0;
 
-  constructor(
-    private readonly executable = "claude",
-    refreshMs = 60_000,
-    private readonly timeoutMs = 15_000,
-    workspace = claudeWorkspacePath(),
-  ) {
-    this.defaultRefreshMs = refreshMs;
-    this.workspace = resolve(workspace);
-    this.dashboard = new DashboardSession("claude", timeoutMs);
-    this.session = new PtySession(executable, {
-      args: [
-        "--ax-screen-reader",
-        "--safe-mode",
-        "--permission-mode",
-        "plan",
-        "--no-chrome",
-      ],
-      rows: 45,
-      cols: 120,
-      cwd: this.workspace,
-      startupTimeoutMs: timeoutMs,
-      startupSettleMs: 1_000,
-      inputDelayMs: 300,
-    });
+  constructor(options: ClaudeAdapterOptions = {}) {
+    this.executable = options.executable ?? "claude";
+    this.defaultRefreshMs = options.refreshMs ?? 60_000;
+    this.timeoutMs = options.timeoutMs ?? 15_000;
+    const account = options.account ?? { id: "default" };
+    this.configDir = resolve(account.configDir ?? defaultClaudeConfigDir());
+    if (options.multiAccount) {
+      this.accountId = account.id;
+      this.accountLabel =
+        account.label ?? account.id.charAt(0).toUpperCase() + account.id.slice(1);
+    }
+    this.reuseProviderCredentials = options.reuseProviderCredentials ?? true;
+    this.workspace = resolve(options.workspace ?? claudeWorkspacePath());
+    this.fetcher = options.fetcher ?? fetch;
+    this.readCredential = options.credentialReader ?? ((dir) => readClaudeCredential(dir));
   }
 
   async detect() {
@@ -492,145 +401,165 @@ export class ClaudeAdapter implements ProviderAdapter {
     return result;
   }
 
-  async start(): Promise<void> {
-    const detected = await this.detect();
-    if (detected.available) await this.prepareSession();
-  }
-
   async stop(): Promise<void> {
-    await Promise.all([
-      this.session.stop("/exit"),
-      this.dashboard.stop(),
-    ]);
+    await this.session?.stop("/exit");
+    this.session = undefined;
   }
 
-  async collect(context?: CollectionContext): Promise<ProviderSnapshot> {
+  async collect(): Promise<ProviderSnapshot> {
     if (!this.version) {
       const detected = await this.detect();
       this.version = detected.version;
     }
-    await this.prepareSession();
-    const [output, dashboardResult] = await Promise.all([
-      this.captureUsage(),
-      this.dashboard.read(context?.force),
-    ]);
-    const parsedCli = parseClaudeUsage(output, this.version);
-    if (parsedCli.plan) this.plan = parsedCli.plan;
-    const cli = {
-      ...parsedCli,
-      plan: parsedCli.plan ?? this.plan ?? null,
-    };
-    const dashboardConnection = dashboardAuthStatus("claude");
-    const cliSource: ProviderSourceStatus = {
-      id: "claude-usage",
-      label: "Plan limits",
-      kind: "cli",
-      role: "primary",
-      state: cli.status === "ok" ? "active" : "error",
-      message: cli.message,
-    };
-    if (dashboardResult.status !== "ok") {
-      const dashboardSource: ProviderSourceStatus = {
-        id: "claude-billing",
-        label: "Billing details",
-        kind: "browser",
-        role: "optional",
-        state:
-          dashboardResult.status === "not-configured"
-            ? "available"
-            : dashboardResult.status === "authentication-required"
-              ? "expired"
-              : "error",
-        message: dashboardResult.message,
-        action:
-          dashboardResult.status === "authentication-required"
-            ? "reconnect-dashboard"
-            : "connect-dashboard",
-      };
-      return {
-        ...cli,
-        status: cli.status,
-        message: cli.message,
-        sources: [cliSource, dashboardSource],
-      };
+    if (!this.reuseProviderCredentials) {
+      return this.unavailable(
+        "Credential reuse disabled",
+        "Set reuseProviderCredentials to true to read Claude Code's saved sign-in",
+      );
     }
-    const dashboard = parseClaudeDashboard(dashboardResult.text);
-    if (!dashboard) {
-      return {
-        ...cli,
-        status: cli.status,
-        message: cli.message,
-        sources: [
-          cliSource,
-          {
-            id: "claude-billing",
-            label: "Billing details",
-            kind: "browser",
-            role: "optional",
-            state: "error",
-            message: "Dashboard format was not recognized",
-            action: dashboardConnection.configured
-              ? "reconnect-dashboard"
-              : "connect-dashboard",
-          },
-        ],
-      };
+
+    let credential = await this.readCredential(this.configDir);
+    if (!credential) {
+      return this.unavailable("Not signed in", `Run ${this.cliHint()} and sign in`);
     }
-    const includedWindows = cli.windows.filter((window) => window.category !== "additional");
-    const cliNonAdditional = cli.metrics.filter((metric) => metric.category !== "additional");
+
+    let result: ClaudeApiResult<ClaudeUsage> = claudeCredentialExpired(credential)
+      ? { status: "unauthorized" }
+      : await fetchClaudeUsage(credential.accessToken, this.timeoutMs, this.fetcher);
+    if (result.status === "unauthorized" && (await this.refreshViaCli())) {
+      credential = await this.readCredential(this.configDir);
+      if (credential && !claudeCredentialExpired(credential)) {
+        result = await fetchClaudeUsage(credential.accessToken, this.timeoutMs, this.fetcher);
+      }
+    }
+    if (result.status === "unauthorized") {
+      return this.unavailable(
+        "Sign-in expired",
+        `Claude Code's sign-in expired; run ${this.cliHint()} to refresh it`,
+      );
+    }
+    if (result.status === "error") throw new Error(result.message);
+
+    if (this.plan === undefined && credential) {
+      const plan = await fetchClaudePlan(credential.accessToken, this.timeoutMs, this.fetcher);
+      if (plan.status === "ok") this.plan = plan.value;
+    }
+
+    const { windows, metrics } = result.value;
+    const primary = windows[0];
+    const available = windows.length > 0;
     return {
-      ...cli,
-      status: includedWindows.length > 0 ? "ok" : "partial",
-      source: "hybrid",
-      windows: [...includedWindows, ...dashboard.windows],
-      metrics: [...dashboard.metrics, ...cliNonAdditional],
-      message: cli.message,
-      sources: [
-        cliSource,
-        {
-          id: "claude-billing",
-          label: "Billing details",
-          kind: "browser",
-          role: "optional",
-          state: "active",
-        },
-      ],
+      ...this.identity(),
+      collectedAt: nowIso(),
+      status: available ? "ok" : "partial",
+      source: "api",
+      plan: this.plan ?? null,
+      summary:
+        primary?.usedPercent !== undefined
+          ? `${formatWindowUsage(primary)} in ${primary.label.toLowerCase()}`
+          : "Usage limits not exposed",
+      windows,
+      metrics,
+      message: available ? null : "Claude did not report any plan limits for this account",
+      version: this.version ?? null,
+      sources: [this.source(available ? "active" : "error", available ? undefined : "No limits reported")],
     };
   }
 
-  private async prepareSession(): Promise<void> {
-    ensureClaudeWorkspace(this.workspace);
-    await this.session.start();
-    await this.acceptWorkspaceTrust(this.session.currentOutput());
-  }
-
-  private async captureUsage(): Promise<string> {
-    let output = await this.session.capture("/usage", this.timeoutMs);
-    if (await this.acceptWorkspaceTrust(output)) {
-      output = await this.session.capture("/usage", this.timeoutMs);
+  /**
+   * Claude Code refreshes its own OAuth token whenever it talks to the API.
+   * Opening its usage screen headlessly is the safest way to trigger that
+   * without taking over the refresh token ourselves.
+   */
+  private async refreshViaCli(): Promise<boolean> {
+    if (Date.now() - this.lastRefreshAttempt < refreshCooldownMs) return false;
+    this.lastRefreshAttempt = Date.now();
+    try {
+      ensureClaudeWorkspace(this.workspace);
+      this.session = new PtySession(this.executable, {
+        args: ["--ax-screen-reader", "--safe-mode", "--permission-mode", "plan", "--no-chrome"],
+        rows: 45,
+        cols: 120,
+        cwd: this.workspace,
+        env: { CLAUDE_CONFIG_DIR: this.configDir },
+        startupTimeoutMs: this.timeoutMs,
+        startupSettleMs: 1_000,
+        inputDelayMs: 300,
+      });
+      await this.session.start();
+      await this.acceptWorkspaceTrust(this.session.currentOutput());
+      const output = await this.session.capture("/usage", this.timeoutMs);
+      if (await this.acceptWorkspaceTrust(output)) {
+        await this.session.capture("/usage", this.timeoutMs);
+      }
+      return true;
+    } catch {
+      return false;
+    } finally {
+      await this.stop();
     }
-    return output;
   }
 
   private async acceptWorkspaceTrust(output: string): Promise<boolean> {
-    this.rememberPlan(output);
-    if (!isClaudeWorkspaceTrustPrompt(output)) return false;
+    if (!this.session || !isClaudeWorkspaceTrustPrompt(output)) return false;
     const target = claudeWorkspaceTrustTarget(output);
     if (!target || resolve(target) !== this.workspace) {
       throw new Error(
         `Claude requested trust for an unexpected workspace: ${target ?? "unknown"}`,
       );
     }
-
     const confirmation = await this.session.capture("y", this.timeoutMs);
-    this.rememberPlan(confirmation);
     if (isClaudeWorkspaceTrustPrompt(confirmation)) {
       throw new Error("Claude did not accept the controlled monitor workspace");
     }
     return true;
   }
 
-  private rememberPlan(output: string): void {
-    this.plan = claudePlan(output) ?? this.plan;
+  private cliHint(): string {
+    return this.configDir === resolve(defaultClaudeConfigDir())
+      ? "claude"
+      : `CLAUDE_CONFIG_DIR=${this.configDir} claude`;
+  }
+
+  private identity(): Pick<
+    ProviderSnapshot,
+    "providerId" | "providerName" | "accountId" | "accountLabel"
+  > {
+    return {
+      providerId: this.id,
+      providerName: this.name,
+      ...(this.accountId ? { accountId: this.accountId } : {}),
+      ...(this.accountLabel ? { accountLabel: this.accountLabel } : {}),
+    };
+  }
+
+  private source(
+    state: ProviderSourceStatus["state"],
+    message?: string,
+  ): ProviderSourceStatus {
+    return {
+      id: "claude-usage",
+      label: "Plan limits",
+      kind: "api",
+      role: "primary",
+      state,
+      ...(message ? { message } : {}),
+    };
+  }
+
+  private unavailable(summary: string, message: string): ProviderSnapshot {
+    return {
+      ...this.identity(),
+      collectedAt: nowIso(),
+      status: "unavailable",
+      source: "api",
+      plan: this.plan ?? null,
+      summary,
+      windows: [],
+      metrics: [],
+      message,
+      version: this.version ?? null,
+      sources: [this.source("expired", message)],
+    };
   }
 }

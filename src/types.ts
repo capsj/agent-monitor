@@ -40,7 +40,6 @@ export const providerSourceKindSchema = z.enum([
   "cli",
   "local",
   "api",
-  "browser",
 ]);
 export type ProviderSourceKind = z.infer<typeof providerSourceKindSchema>;
 
@@ -51,7 +50,6 @@ export const providerSourceStatusSchema = z.object({
   role: z.enum(["primary", "optional"]),
   state: z.enum(["active", "available", "action-required", "expired", "error"]),
   message: z.string().nullable().optional(),
-  action: z.enum(["connect-dashboard", "reconnect-dashboard"]).optional(),
 });
 export type ProviderSourceStatus = z.infer<typeof providerSourceStatusSchema>;
 
@@ -82,9 +80,11 @@ export type UsageWindow = z.infer<typeof usageWindowSchema>;
 export const providerSnapshotSchema = z.object({
   providerId: z.enum(providerIds),
   providerName: z.string(),
+  accountId: z.string().optional(),
+  accountLabel: z.string().optional(),
   collectedAt: z.string().datetime(),
   status: snapshotStatusSchema,
-  source: z.enum(["structured", "cli", "local", "api", "browser", "hybrid"]),
+  source: z.enum(["structured", "cli", "local", "api", "hybrid"]),
   plan: z.string().nullable().optional(),
   summary: z.string(),
   windows: z.array(usageWindowSchema).default([]),
@@ -94,6 +94,24 @@ export const providerSnapshotSchema = z.object({
   sources: z.array(providerSourceStatusSchema).optional(),
 });
 export type ProviderSnapshot = z.infer<typeof providerSnapshotSchema>;
+
+/**
+ * Snapshots are keyed by provider, or by `provider:account` when a provider is
+ * configured with several accounts.
+ */
+export function snapshotKey(
+  snapshot: Pick<ProviderSnapshot, "providerId" | "accountId">,
+): string {
+  return snapshot.accountId ? `${snapshot.providerId}:${snapshot.accountId}` : snapshot.providerId;
+}
+
+export function displayName(
+  snapshot: Pick<ProviderSnapshot, "providerName" | "accountLabel">,
+): string {
+  return snapshot.accountLabel
+    ? `${snapshot.providerName} · ${snapshot.accountLabel}`
+    : snapshot.providerName;
+}
 
 export interface DetectionResult {
   available: boolean;
@@ -105,6 +123,8 @@ export interface DetectionResult {
 export interface ProviderAdapter {
   readonly id: ProviderId;
   readonly name: string;
+  readonly accountId?: string;
+  readonly accountLabel?: string;
   readonly defaultRefreshMs: number;
   detect(): Promise<DetectionResult>;
   start?(): Promise<void>;
@@ -127,8 +147,8 @@ export interface TrendSummary {
 }
 
 export interface MonitorState {
-  snapshots: Map<ProviderId, ProviderSnapshot>;
-  refreshing: Set<ProviderId>;
+  snapshots: Map<string, ProviderSnapshot>;
+  refreshing: Set<string>;
   paused: boolean;
 }
 
@@ -137,14 +157,15 @@ export function nowIso(): string {
 }
 
 export function errorSnapshot(
-  id: ProviderId,
-  name: string,
+  adapter: Pick<ProviderAdapter, "id" | "name" | "accountId" | "accountLabel">,
   source: ProviderSnapshot["source"],
   error: unknown,
 ): ProviderSnapshot {
   return {
-    providerId: id,
-    providerName: name,
+    providerId: adapter.id,
+    providerName: adapter.name,
+    ...(adapter.accountId ? { accountId: adapter.accountId } : {}),
+    ...(adapter.accountLabel ? { accountLabel: adapter.accountLabel } : {}),
     collectedAt: nowIso(),
     status: "error",
     source,

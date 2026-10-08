@@ -9,10 +9,10 @@ const config: MonitorConfig = {
   executables: {
     codex: "codex",
     claude: "claude",
-    cursor: "cursor-agent",
     opencode: "opencode",
     gemini: "gemini",
   },
+  accounts: { claude: [{ id: "default" }] },
   warningPercent: 70,
   criticalPercent: 90,
   retentionDays: 90,
@@ -137,6 +137,31 @@ describe("monitor engine", () => {
     expect(stale?.metrics).toContainEqual(
       expect.objectContaining({ key: "credit_balance", value: 19.07 }),
     );
+    await engine.stop();
+  });
+
+  it("keeps snapshots for several accounts of one provider apart", async () => {
+    const account = (id: string, usedPercent: number): ProviderAdapter => ({
+      id: "claude",
+      name: "Claude Code",
+      accountId: id,
+      accountLabel: id === "work" ? "Work" : "Personal",
+      defaultRefreshMs: 60_000,
+      detect: async () => ({ available: true }),
+      collect: async () => ({
+        ...goodSnapshot,
+        providerId: "claude",
+        providerName: "Claude Code",
+        accountId: id,
+        windows: [{ id: "session", label: "Session", usedPercent, quality: "exact" }],
+      }),
+    });
+    const engine = new MonitorEngine([account("personal", 10), account("work", 42)], config);
+    await engine.start();
+
+    expect(engine.keys()).toEqual(["claude:personal", "claude:work"]);
+    expect(engine.getState().snapshots.get("claude:personal")?.windows[0]?.usedPercent).toBe(10);
+    expect(engine.getState().snapshots.get("claude:work")?.windows[0]?.usedPercent).toBe(42);
     await engine.stop();
   });
 });

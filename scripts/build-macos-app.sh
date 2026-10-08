@@ -21,6 +21,9 @@ cp "$repo_dir/macos/Resources/Info.plist" "$contents_dir/Info.plist"
 cp "$repo_dir/macos/Resources/agent-monitor-backend" "$resources_dir/agent-monitor-backend"
 node_path="$(command -v node)"
 print -r -- "$node_path" > "$resources_dir/node-path"
+# Remember where this checkout's CLI lives so the app keeps working after it is
+# copied to /Applications.
+print -r -- "${repo_dir:A}/dist/cli.js" > "$resources_dir/cli-path"
 chmod 755 "$macos_dir/AgentMonitorMenuBar" "$resources_dir/agent-monitor-backend"
 
 # Ad-hoc signing avoids a quarantine-style warning for this local development build.
@@ -28,3 +31,4 @@ codesign --force --sign - "$app_dir"
 
 print "Built $app_dir"
 print "Open it with: open '$app_dir'"
+print "Install it with: pnpm install:macos"

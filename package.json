@@ -10,7 +10,7 @@
   "scripts": {
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
     "build:macos": "./scripts/build-macos-app.sh",
-    "auth": "tsx src/cli.tsx auth",
+    "install:macos": "./scripts/install-macos-app.sh",
     "dev": "tsx src/cli.tsx",
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",
     "start": "node dist/cli.js",
@@ -27,7 +27,6 @@
     "commander": "^15.0.0",
     "ink": "^7.1.1",
     "node-pty": "^1.1.0",
-    "playwright-core": "^1.61.1",
     "react": "^19.2.0",
     "strip-ansi": "^7.1.2",
     "zod": "^4.4.3"

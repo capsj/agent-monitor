@@ -11,10 +11,10 @@ const config: MonitorConfig = {
   executables: {
     codex: "codex",
     claude: "claude",
-    cursor: "cursor-agent",
     opencode: "opencode",
     gemini: "gemini",
   },
+  accounts: { claude: [{ id: "default" }] },
   warningPercent: 70,
   criticalPercent: 90,
   retentionDays: 90,
@@ -25,6 +25,7 @@ const config: MonitorConfig = {
 
 function mockEngine(state: MonitorState): MonitorEngine {
   return {
+    keys: () => [...state.snapshots.keys()],
     subscribe(listener: (value: MonitorState) => void) {
       listener(state);
       return () => undefined;
@@ -121,91 +122,42 @@ describe("dashboard", () => {
     expect(frame).toContain("Cursor");
   });
 
-  it("authenticates the selected dashboard from the keyboard", async () => {
-    const authenticateProvider = vi
-      .fn()
-      .mockResolvedValue("https://cursor.com/dashboard/usage");
+  it("labels each configured account of a provider", async () => {
+    const claude = (accountId: string, accountLabel: string, usedPercent: number): ProviderSnapshot => ({
+      providerId: "claude",
+      providerName: "Claude Code",
+      accountId,
+      accountLabel,
+      collectedAt: "2026-07-24T08:00:00.000Z",
+      status: "ok",
+      source: "api",
+      plan: accountId === "work" ? "Team" : "Max 5x",
+      summary: `${100 - usedPercent}% left in session`,
+      windows: [{ id: "session", label: "Session", usedPercent, quality: "exact", category: "included" }],
+      metrics: [],
+      message: null,
+      version: "test",
+    });
     const instance = render(
       <App
         engine={mockEngine({
-          snapshots: new Map(),
+          snapshots: new Map([
+            ["claude:personal", claude("personal", "Personal", 9)],
+            ["claude:work", claude("work", "Work", 42)],
+          ]),
           refreshing: new Set(),
           paused: false,
         })}
-        config={{ ...config, enabledProviders: ["cursor"] }}
-        authenticateProvider={authenticateProvider}
+        config={config}
       />,
     );
-
-    instance.stdin.write("a");
     await new Promise((resolve) => setTimeout(resolve, 20));
-
-    expect(authenticateProvider).toHaveBeenCalledWith(
-      "cursor",
-      "isolated",
-      expect.anything(),
-    );
-    expect(instance.lastFrame()).toContain("Dashboard connected");
-    expect(instance.lastFrame()).toContain("Cursor connected at cursor.com");
-  });
-
-  it("can authenticate through the personal Chrome session", async () => {
-    const authenticateProvider = vi
-      .fn()
-      .mockResolvedValue("https://cursor.com/dashboard/usage");
-    const instance = render(
-      <App
-        engine={mockEngine({
-          snapshots: new Map(),
-          refreshing: new Set(),
-          paused: false,
-        })}
-        config={{ ...config, enabledProviders: ["cursor"] }}
-        authenticateProvider={authenticateProvider}
-      />,
-    );
-
-    instance.stdin.write("A");
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    expect(authenticateProvider).toHaveBeenCalledWith(
-      "cursor",
-      "personal",
-      expect.anything(),
-    );
-    expect(instance.lastFrame()).toContain("using personal Chrome");
-  });
-
-  it("cancels an authentication that is still waiting on Chrome", async () => {
-    const authenticateProvider = vi.fn(
-      (
-        _provider: string,
-        _mode: string,
-        signal?: AbortSignal,
-      ) =>
-        new Promise<string>((_resolve, reject) => {
-          signal?.addEventListener("abort", () => {
-            reject(new Error("Dashboard authentication cancelled"));
-          });
-        }),
-    );
-    const instance = render(
-      <App
-        engine={mockEngine({
-          snapshots: new Map(),
-          refreshing: new Set(),
-          paused: false,
-        })}
-        config={{ ...config, enabledProviders: ["cursor"] }}
-        authenticateProvider={authenticateProvider}
-      />,
-    );
-
-    instance.stdin.write("A");
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    instance.stdin.write("q");
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    expect(instance.lastFrame()).toContain("Dashboard authentication cancelled");
+    const frame = instance.lastFrame();
+    expect(frame).toContain("Claude Code · Personal");
+    expect(frame).toContain("Max 5x");
+    expect(frame).toContain("91% left");
+    expect(frame).toContain("Claude Code · Work");
+    expect(frame).toContain("Team");
+    expect(frame).toContain("58% left");
   });
 });

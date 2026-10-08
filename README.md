@@ -11,12 +11,11 @@ an eye on your AI coding subscriptions and local agent usage in one place.
 **OpenCode**, and **Gemini CLI**. It shows the information each provider
 actually exposes—usage windows, reset times, credits, token counts, costs, and
 local activity—without pretending that unlike metrics are directly
-comparable.
+comparable. Claude Code can be monitored for several accounts at once.
 
 ![agent-monitor showing live Codex, Claude Code, Cursor, OpenCode, and Gemini CLI usage in the terminal](docs/images/agent-monitor-dashboard.png)
 
-The exact fields depend on the provider, account, CLI version, and whether you
-have connected its optional web dashboard.
+The exact fields depend on the provider, account, and CLI version.
 
 > [!IMPORTANT]
 > `agent-monitor` is a local, read-only monitor. It does not send prompts,
@@ -32,17 +31,21 @@ snapshot format, and renders those snapshots with
 ```text
 Provider CLIs ───────┐
 Local usage files ──┼─→ provider adapters ─→ snapshots ─┬─→ terminal UI
-Opt-in dashboards ──┘                                   ├─→ macOS menu bar
+Provider usage APIs ┘                                   ├─→ macOS menu bar
                                                         └─→ local history
 ```
 
 | Provider | Data source | What is available |
 | --- | --- | --- |
 | Codex | Local Codex app-server JSON-RPC | Account windows, reset times, credits, plan, and token history |
-| Claude Code | Built-in `/usage` screen; optional managed dashboard | Session and weekly limits; connected dashboard credits and balance |
-| Cursor | `cursor-agent status/about`; managed dashboard | Authentication, plan health, and personal usage |
-| OpenCode | `opencode stats`; Go usage API; optional managed dashboard | Local activity, Go limits, estimated cost, and connected balance |
+| Claude Code | Claude's usage API, using the sign-in Claude Code already saved | Session, weekly, and per-model limits with exact reset times; usage credits; plan |
+| Cursor | Cursor's dashboard API, using the sign-in the Cursor app already saved | Included plan usage per model group, bonus usage, on-demand spending, billing cycle |
+| OpenCode | `opencode stats`; Go usage API | Local activity, Go limits, estimated cost |
 | Gemini CLI | Built-in `/stats`; local session metadata | Model quota when exposed, plus today's sessions and token totals |
+
+No browser is involved. Every provider is polled on its own interval over
+plain HTTPS or local commands, so nothing has to stay open for values to
+update.
 
 Collection runs independently for every provider. A provider failure therefore
 affects only its own card. Successful values remain visible as stale data when
@@ -67,10 +70,9 @@ You will need:
 - macOS
 - Node.js 22.12 or newer
 - [pnpm](https://pnpm.io/)
-- At least one supported provider CLI, already installed and authenticated
-- Google Chrome or Chromium only for Cursor personal usage or optional billing details
+- At least one supported provider, already installed and signed in
 
-You do not need every provider CLI. Missing providers simply appear as
+You do not need every provider. Missing providers simply appear as
 unavailable, and you can disable them in the configuration.
 
 ### 2. Install and build
@@ -108,58 +110,47 @@ agent-monitor
 The monitor begins collecting immediately and refreshes each provider at its
 own safe interval.
 
-### 5. Build the macOS menu-bar app
+### 5. Install the macOS menu-bar app
 
 The native app requires the macOS Command Line Tools and uses the same provider
 engine as the terminal dashboard:
 
 ```sh
-pnpm build:macos
-open "build/Agent Monitor.app"
+pnpm install:macos
 ```
 
-The local build runs directly from this checkout. If you move the app into
-`/Applications`, first make the CLI globally available with `pnpm link --global`.
+This builds `Agent Monitor.app`, copies it to `/Applications`, and opens it.
+From then on you can launch it from Spotlight, Launchpad, or Raycast, and the
+**Launch at login** checkbox in its popover keeps it running after a restart.
+The installed app runs the CLI from this checkout, so rebuild with
+`pnpm install:macos` after pulling changes.
+
+To build without installing, use `pnpm build:macos` and open
+`build/Agent Monitor.app`.
+
 The app has no Dock icon: click its gauge icon in the menu bar to see providers,
-expand usage details, connect or reconnect dashboard-backed fields, refresh one
-provider or all providers, or pause polling.
+expand usage details, refresh one provider or all providers, or pause polling.
 
-### 6. Optionally connect provider dashboards
+## Provider sign-ins
 
-Most usage loads without browser access. Cursor personal usage and optional
-Claude/OpenCode billing details come from managed web sessions. Connecting one
-is explicit:
+`agent-monitor` never asks you to sign in. It reuses the sign-ins that the
+provider tools already keep on this Mac, read-only:
 
-```sh
-agent-monitor auth claude
-agent-monitor auth cursor
-agent-monitor auth opencode
-```
+- **Claude Code** stores an OAuth token in the macOS keychain (or in
+  `.credentials.json` inside its configuration directory). The monitor sends
+  that token only to `api.anthropic.com` to read usage and plan details. Claude
+  Code refreshes the token itself whenever it runs; if a token has expired, the
+  monitor opens Claude Code once in a private workspace so it can refresh, and
+  otherwise asks you to run `claude` for that account.
+- **Cursor** keeps a dashboard session token in the Cursor app's local state
+  database. The monitor opens that database read-only and sends the token only
+  to `cursor.com`. Keep the Cursor app signed in.
+- **OpenCode** keeps its Go API key in `auth.json`. The monitor sends it only to
+  `opencode.ai`.
+- **Codex** and **Gemini CLI** are read through their own local processes.
 
-The command opens an isolated Chrome profile. Sign in and navigate to the
-requested usage or billing page; the window closes automatically once the
-connection is ready. The saved profile is reused headlessly on later runs, so
-no dashboard tab needs to remain open or be refreshed manually.
-
-You can also connect a dashboard from inside the monitor: select its provider
-and press `a`.
-
-To reuse a tab that is already signed in through your personal Chrome profile:
-
-```sh
-agent-monitor auth claude --personal
-```
-
-Personal mode requires macOS automation permission and Chrome's
-**View → Developer → Allow JavaScript from Apple Events** setting. Keep the
-matching usage tab open while the monitor runs. Use isolated mode if you prefer
-not to grant access to your personal Chrome session.
-
-Check the dashboard connection state with:
-
-```sh
-agent-monitor auth-status
-```
+Set `reuseProviderCredentials` to `false` to turn all of this off; Claude,
+Cursor, and OpenCode Go limits then show as unavailable.
 
 ## Keyboard controls
 
@@ -167,12 +158,10 @@ agent-monitor auth-status
 | --- | --- |
 | `↑` / `↓` or `j` / `k` | Select a provider |
 | `Enter` | Expand or collapse provider details |
-| `a` | Connect an isolated dashboard session |
-| `Shift+A` | Connect through personal Chrome |
 | `r` | Refresh all providers now |
 | `Space` | Pause or resume polling |
 | `h` | Show help |
-| `q` or `Esc` | Quit or cancel authentication |
+| `q` | Quit |
 
 ## Useful commands
 
@@ -229,9 +218,14 @@ Example:
   "executables": {
     "codex": "codex",
     "claude": "claude",
-    "cursor": "cursor-agent",
     "opencode": "opencode",
     "gemini": "gemini"
+  },
+  "accounts": {
+    "claude": [
+      { "id": "personal", "label": "Personal", "configDir": "~/.claude" },
+      { "id": "work", "label": "Work", "configDir": "~/.claude-work" }
+    ]
   },
   "warningPercent": 70,
   "criticalPercent": 90,
@@ -245,47 +239,51 @@ Example:
 Use `--config <path>` to load a different file. Executable values may also be
 absolute paths when a provider CLI is not available through `PATH`.
 
+### Several Claude Code accounts
+
+Claude Code keeps one sign-in per configuration directory, selected with the
+`CLAUDE_CONFIG_DIR` environment variable. List each directory under
+`accounts.claude` and the monitor shows one card per account, labeled
+`Claude Code · <label>`. With a single entry (the default, `~/.claude` or
+`$CLAUDE_CONFIG_DIR`), the card is simply `Claude Code`.
+
 ## Local data and privacy
 
 `agent-monitor` is designed to keep credentials and personal content out of its
 own data:
 
-- No API keys, OAuth tokens, browser cookies, email addresses, prompts,
-  transcripts, or raw terminal/dashboard screens are written to configuration,
+- No API keys, OAuth tokens, session tokens, email addresses, prompts,
+  transcripts, or raw terminal screens are written to configuration,
   history, logs, or snapshots.
 - Codex credentials remain inside Codex; the monitor communicates with the
   already-authenticated local app-server.
+- Claude Code and Cursor tokens are read into memory only for the duration of
+  a request and sent only to their own provider's API.
 - For OpenCode Go, the monitor reads only OpenCode's own `opencode-go` API-key
   record in memory and sends it only to `https://opencode.ai` for the read-only
-  usage request. Set `reuseProviderCredentials` to `false` to disable this.
-- Claude terminal output and dashboard text are kept in memory only long enough
-  to extract an allowlist of usage values.
+  usage request.
 - Gemini files are inspected only for session filenames and numeric `tokens`
   objects; message content is not retained.
-- Dashboard parsing fails closed. An unknown page format produces partial or
+- API parsing fails closed. An unknown response format produces partial or
   unavailable data instead of guessed values.
 
 Local files on macOS are stored under:
 
 ```text
 ~/Library/Application Support/agent-monitor/
-├── history.sqlite3
-└── dashboard-profiles/
+└── history.sqlite3
 ```
-
-Dashboard profile directories use mode `0700`, metadata files use mode `0600`,
-and Chrome manages its own cookies. Isolated browser cookies are never copied
-into the monitor's configuration or history. Personal Chrome mode stores only
-the selected dashboard URL and reads visible text from that matching tab.
 
 ## Limitations
 
 - The current release targets macOS.
-- Provider CLIs and web dashboards can change without notice. Parsers surface
+- Provider CLIs and APIs can change without notice. Parsers surface
   unsupported formats as partial or unavailable.
 - Codex's local app-server protocol is experimental.
-- Cursor's programmatic usage API targets teams, so personal usage requires the
-  optional dashboard flow.
+- Cursor usage requires the Cursor desktop app to be installed and signed in;
+  the `cursor-agent` CLI's own token is not accepted by Cursor's dashboard.
+- OpenCode's billing balance is only shown on its web dashboard and is not
+  collected.
 - Gemini cannot report passive quota state until the Gemini CLI receives an API
   response; the monitor currently focuses on local activity.
 

@@ -11,8 +11,6 @@ import type {
 import { nowIso } from "../types.js";
 import { formatWindowUsage } from "../utils/format.js";
 import { cleanTerminalOutput, detectVersion, runCommand } from "../utils/process.js";
-import { DashboardSession, dashboardAuthStatus } from "../dashboard-auth.js";
-import { parseOpenCodeDashboard } from "./dashboard-parsers.js";
 
 const openCodeGoUsageSchema = z.object({
   usage: z.object({
@@ -247,7 +245,6 @@ export class OpenCodeAdapter implements ProviderAdapter {
   readonly name = "OpenCode";
   readonly defaultRefreshMs: number;
   private version?: string;
-  private readonly dashboard: DashboardSession;
   private apiCache?: { at: number; usage: OpenCodeGoUsage };
 
   constructor(
@@ -259,7 +256,6 @@ export class OpenCodeAdapter implements ProviderAdapter {
     private readonly fetcher: typeof fetch = fetch,
   ) {
     this.defaultRefreshMs = refreshMs;
-    this.dashboard = new DashboardSession("opencode", timeoutMs);
   }
 
   async detect() {
@@ -273,7 +269,7 @@ export class OpenCodeAdapter implements ProviderAdapter {
     const key = this.reuseProviderCredentials
       ? readOpenCodeGoKey(this.authPath)
       : undefined;
-    const [stats, account, apiResult, dashboardResult] = await Promise.all([
+    const [stats, account, apiResult] = await Promise.all([
       runCommand(
         this.executable,
         ["stats", "--days", "1", "--models", "10"],
@@ -286,7 +282,6 @@ export class OpenCodeAdapter implements ProviderAdapter {
       key
         ? this.readGoUsage(key, context?.force)
         : Promise.resolve({ status: "not-configured" as const }),
-      this.dashboard.read(context?.force),
     ]);
     const accountOutput = `${account.stdout}\n${account.stderr}`;
     const localFailure = stats.timedOut
@@ -309,16 +304,8 @@ export class OpenCodeAdapter implements ProviderAdapter {
           version: this.version ?? null,
         }
       : parseOpenCodeStats(stats.stdout, this.version, accountOutput);
-    const dashboard =
-      dashboardResult.status === "ok"
-        ? parseOpenCodeDashboard(dashboardResult.text)
-        : undefined;
-    const remoteWindows =
-      apiResult.status === "ok"
-        ? apiResult.usage.windows
-        : dashboard?.windows ?? [];
+    const remoteWindows = apiResult.status === "ok" ? apiResult.usage.windows : [];
     const primary = remoteWindows[0];
-    const configured = dashboardAuthStatus("opencode").configured;
     const sources: ProviderSourceStatus[] = [
       {
         id: "opencode-local",
@@ -339,49 +326,19 @@ export class OpenCodeAdapter implements ProviderAdapter {
         ...(apiResult.status === "error" ? { message: apiResult.message } : {}),
       });
     }
-    sources.push({
-      id: "opencode-billing",
-      label: "Billing balance",
-      kind: "browser",
-      role: key ? "optional" : "primary",
-      state: dashboard
-        ? "active"
-        : dashboardResult.status === "not-configured"
-          ? "available"
-          : dashboardResult.status === "authentication-required"
-            ? "expired"
-            : "error",
-      message: dashboard
-        ? undefined
-        : dashboardResult.status === "ok"
-          ? "Dashboard format was not recognized"
-          : dashboardResult.message,
-      action: dashboard
-        ? undefined
-        : configured
-          ? "reconnect-dashboard"
-          : "connect-dashboard",
-    });
     const hasGoPlan = local.plan === "Go" || Boolean(key) || remoteWindows.length > 0;
-    const remoteMessage =
-      apiResult.status === "error"
-        ? apiResult.message
-        : dashboardResult.status !== "ok" && !key
-          ? dashboardResult.message
-          : dashboardResult.status === "ok" && !dashboard && !key
-            ? "OpenCode dashboard format was not recognized"
-            : undefined;
+    const remoteMessage = apiResult.status === "error" ? apiResult.message : undefined;
     return {
       ...local,
       status: remoteWindows.length > 0 ? "ok" : hasGoPlan ? "partial" : local.status,
-      source: apiResult.status === "ok" || dashboard ? "hybrid" : local.source,
-      plan: dashboard?.plan ?? (hasGoPlan ? "Go" : local.plan),
+      source: apiResult.status === "ok" ? "hybrid" : local.source,
+      plan: hasGoPlan ? "Go" : local.plan,
       summary:
         primary?.usedPercent === undefined
           ? local.summary
           : `${formatWindowUsage(primary)} in ${primary.label.toLowerCase()}`,
       windows: remoteWindows,
-      metrics: [...(dashboard?.metrics ?? []), ...local.metrics],
+      metrics: local.metrics,
       message: remoteWindows.length > 0 ? local.message : remoteMessage ?? local.message,
       sources,
     };
@@ -408,7 +365,6 @@ export class OpenCodeAdapter implements ProviderAdapter {
   }
 
   async stop(): Promise<void> {
-    await this.dashboard.stop();
     this.apiCache = undefined;
   }
 }
