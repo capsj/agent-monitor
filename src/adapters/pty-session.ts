@@ -1,4 +1,4 @@
-import * as pty from "node-pty";
+import { IsolatedPty } from "./isolated-pty.js";
 import { cleanTerminalOutput, resolveExecutable } from "../utils/process.js";
 
 export interface PtySessionOptions {
@@ -13,7 +13,7 @@ export interface PtySessionOptions {
 }
 
 export class PtySession {
-  private terminal?: pty.IPty;
+  private terminal?: IsolatedPty;
   private buffer = "";
   private lastOutputAt = 0;
   private exited = false;
@@ -28,7 +28,7 @@ export class PtySession {
     this.buffer = "";
     this.lastOutputAt = Date.now();
     this.exited = false;
-    this.terminal = pty.spawn(resolveExecutable(this.executable), this.options.args ?? [], {
+    this.terminal = await IsolatedPty.spawn(resolveExecutable(this.executable), this.options.args ?? [], {
       name: "xterm-256color",
       cols: this.options.cols ?? 120,
       rows: this.options.rows ?? 40,
@@ -39,13 +39,11 @@ export class PtySession {
         NO_COLOR: "1",
         ...this.options.env,
       } as Record<string, string>,
-    });
-    this.terminal.onData((chunk) => {
+    }, (chunk) => {
       this.buffer += chunk;
       if (this.buffer.length > 250_000) this.buffer = this.buffer.slice(-250_000);
       this.lastOutputAt = Date.now();
-    });
-    this.terminal.onExit(() => {
+    }, () => {
       this.exited = true;
     });
     await this.waitForSilence(700, this.options.startupTimeoutMs ?? 12_000, true);
