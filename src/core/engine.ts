@@ -1,5 +1,6 @@
 import type { MonitorConfig } from "../config.js";
 import {
+  RateLimitError,
   errorSnapshot,
   snapshotKey,
   type MonitorState,
@@ -26,6 +27,8 @@ function fallbackSource(adapter: ProviderAdapter): ProviderSnapshot["source"] {
       return "local";
   }
 }
+
+const maxRateLimitBackoffMs = 60 * 60_000;
 
 export class MonitorEngine {
   private readonly snapshots = new Map<string, ProviderSnapshot>();
@@ -101,6 +104,7 @@ export class MonitorEngine {
     this.refreshing.add(key);
     this.emit();
     let failed = false;
+    let rateLimit: RateLimitError | undefined;
     try {
       const collected = await adapter.collect({
         reason: manual ? "manual" : "scheduled",
@@ -115,6 +119,7 @@ export class MonitorEngine {
       if (snapshot.status !== "stale") this.history?.record(snapshot);
     } catch (error) {
       failed = true;
+      if (error instanceof RateLimitError) rateLimit = error;
       const failure = errorSnapshot(adapter, fallbackSource(adapter), error);
       const snapshot = this.staleOrError(key, failure);
       this.snapshots.set(key, snapshot);
@@ -126,7 +131,14 @@ export class MonitorEngine {
       this.emit();
       if (!this.stopped) {
         const base = adapter.defaultRefreshMs;
-        const delay = manual || !failed ? base : Math.min(base * 2 ** failureCount, 300_000);
+        const delay = rateLimit
+          ? Math.max(
+              rateLimit.retryAfterMs ?? 0,
+              Math.min(base * 2 ** failureCount, maxRateLimitBackoffMs),
+            )
+          : manual || !failed
+            ? base
+            : Math.min(base * 2 ** failureCount, 300_000);
         const timer = setTimeout(() => void this.collect(key), delay);
         timer.unref();
         this.timers.set(key, timer);

@@ -15,7 +15,7 @@ import type {
   ProviderSourceStatus,
   UsageWindow,
 } from "../types.js";
-import { nowIso } from "../types.js";
+import { RateLimitError, nowIso } from "../types.js";
 import { claudeWorkspacePath, defaultClaudeConfigDir } from "../config.js";
 import { formatWindowUsage } from "../utils/format.js";
 import { cleanTerminalOutput, detectVersion } from "../utils/process.js";
@@ -279,7 +279,16 @@ export function claudePlanLabel(input: unknown): string | null {
 export type ClaudeApiResult<T> =
   | { status: "ok"; value: T }
   | { status: "unauthorized" }
+  | { status: "rate-limited"; retryAfterMs?: number }
   | { status: "error"; message: string };
+
+/** Parses a Retry-After header, which is either seconds or an HTTP date. */
+export function parseRetryAfterMs(value: string | null, now = Date.now()): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now;
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined;
+}
 
 async function fetchClaudeJson(
   url: string,
@@ -300,6 +309,10 @@ async function fetchClaudeJson(
       signal: controller.signal,
     });
     if (response.status === 401 || response.status === 403) return { status: "unauthorized" };
+    if (response.status === 429) {
+      const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+      return { status: "rate-limited", ...(retryAfterMs ? { retryAfterMs } : {}) };
+    }
     if (!response.ok) {
       return { status: "error", message: `Claude usage request failed (${response.status})` };
     }
@@ -359,6 +372,7 @@ export interface ClaudeAdapterOptions {
 }
 
 const refreshCooldownMs = 10 * 60_000;
+const rateLimitMessage = "Claude is rate limiting usage requests (429); backing off";
 
 export class ClaudeAdapter implements ProviderAdapter {
   readonly id = "claude" as const;
@@ -377,10 +391,11 @@ export class ClaudeAdapter implements ProviderAdapter {
   private version?: string;
   private plan?: string | null;
   private lastRefreshAttempt = 0;
+  private rateLimitedUntil = 0;
 
   constructor(options: ClaudeAdapterOptions = {}) {
     this.executable = options.executable ?? "claude";
-    this.defaultRefreshMs = options.refreshMs ?? 60_000;
+    this.defaultRefreshMs = options.refreshMs ?? 300_000;
     this.timeoutMs = options.timeoutMs ?? 15_000;
     const account = options.account ?? { id: "default" };
     this.configDir = resolve(account.configDir ?? defaultClaudeConfigDir());
@@ -418,6 +433,10 @@ export class ClaudeAdapter implements ProviderAdapter {
       );
     }
 
+    // Stay quiet for as long as Claude asked, even on manual refreshes.
+    const waitMs = this.rateLimitedUntil - Date.now();
+    if (waitMs > 0) throw new RateLimitError(rateLimitMessage, waitMs);
+
     let credential = await this.readCredential(this.configDir);
     if (!credential) {
       return this.unavailable("Not signed in", `Run ${this.cliHint()} and sign in`);
@@ -437,6 +456,10 @@ export class ClaudeAdapter implements ProviderAdapter {
         "Sign-in expired",
         `Claude Code's sign-in expired; run ${this.cliHint()} to refresh it`,
       );
+    }
+    if (result.status === "rate-limited") {
+      this.rateLimitedUntil = Date.now() + (result.retryAfterMs ?? 0);
+      throw new RateLimitError(rateLimitMessage, result.retryAfterMs);
     }
     if (result.status === "error") throw new Error(result.message);
 

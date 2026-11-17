@@ -210,7 +210,7 @@ Example:
   "enabledProviders": ["codex", "claude", "cursor", "opencode", "gemini"],
   "refreshSeconds": {
     "codex": 30,
-    "claude": 60,
+    "claude": 300,
     "cursor": 300,
     "opencode": 30,
     "gemini": 60

@@ -152,6 +152,18 @@ export interface MonitorState {
   paused: boolean;
 }
 
+/** Thrown by adapters when a provider asks us to slow down. */
+export class RateLimitError extends Error {
+  constructor(
+    message: string,
+    /** Delay suggested by the provider, when it sent one. */
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+    this.name = "RateLimitError";
+  }
+}
+
 export function nowIso(): string {
   return new Date().toISOString();
 }

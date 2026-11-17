@@ -13,7 +13,7 @@ const executableSchema = z.object({
 
 const intervalsSchema = z.object({
   codex: z.number().int().min(10).default(30),
-  claude: z.number().int().min(30).default(60),
+  claude: z.number().int().min(30).default(300),
   cursor: z.number().int().min(30).default(300),
   opencode: z.number().int().min(10).default(30),
   gemini: z.number().int().min(30).default(60),
@@ -33,7 +33,7 @@ const configSchema = z.object({
   enabledProviders: z.array(z.enum(providerIds)).default([...providerIds]),
   refreshSeconds: intervalsSchema.default({
     codex: 30,
-    claude: 60,
+    claude: 300,
     cursor: 300,
     opencode: 30,
     gemini: 60,

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MonitorConfig } from "../src/config.js";
 import { MonitorEngine } from "../src/core/engine.js";
-import type { ProviderAdapter, ProviderSnapshot } from "../src/types.js";
+import { RateLimitError, type ProviderAdapter, type ProviderSnapshot } from "../src/types.js";
 
 const config: MonitorConfig = {
   enabledProviders: ["codex"],
@@ -163,5 +163,36 @@ describe("monitor engine", () => {
     expect(engine.getState().snapshots.get("claude:personal")?.windows[0]?.usedPercent).toBe(10);
     expect(engine.getState().snapshots.get("claude:work")?.windows[0]?.usedPercent).toBe(42);
     await engine.stop();
+  });
+
+  it("waits for the delay a rate-limited provider suggests, even after a manual refresh", async () => {
+    vi.useFakeTimers();
+    try {
+      const collect = vi.fn<ProviderAdapter["collect"]>()
+        .mockRejectedValueOnce(new RateLimitError("slow down", 600_000))
+        .mockResolvedValue(goodSnapshot);
+      const adapter: ProviderAdapter = {
+        id: "codex",
+        name: "Codex",
+        defaultRefreshMs: 30_000,
+        detect: async () => ({ available: true }),
+        collect,
+      };
+      const engine = new MonitorEngine([adapter], config);
+      await engine.start();
+      await engine.collect("codex", true).catch(() => undefined);
+      collect.mockClear();
+      collect.mockRejectedValueOnce(new RateLimitError("slow down", 600_000));
+      await engine.collect("codex", true);
+      collect.mockClear();
+
+      await vi.advanceTimersByTimeAsync(599_000);
+      expect(collect).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(collect).toHaveBeenCalledTimes(1);
+      await engine.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -110,6 +110,29 @@ describe("Claude usage API", () => {
     expect(JSON.stringify(malformedResult)).not.toMatch(/access-secret|server-secret/);
   });
 
+  it("surfaces 429s with the delay Claude suggests and stops calling meanwhile", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response("slow down", { status: 429, headers: { "retry-after": "120" } }),
+    );
+    expect(await fetchClaudeUsage("access-secret", 1_000, fetcher)).toEqual({
+      status: "rate-limited",
+      retryAfterMs: 120_000,
+    });
+
+    const adapter = new ClaudeAdapter({
+      executable: "/nonexistent/claude",
+      fetcher,
+      credentialReader: async () => ({ accessToken: "access-secret", expiresAt: Date.now() + 3_600_000 }),
+    });
+    await expect(adapter.collect()).rejects.toMatchObject({
+      name: "RateLimitError",
+      retryAfterMs: 120_000,
+    });
+    const calls = fetcher.mock.calls.length;
+    await expect(adapter.collect()).rejects.toMatchObject({ name: "RateLimitError" });
+    expect(fetcher).toHaveBeenCalledTimes(calls);
+  });
+
   it("collects per-account snapshots without launching the CLI", async () => {
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) => {
       const url = String(input);
